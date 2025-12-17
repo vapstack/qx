@@ -294,6 +294,84 @@ func TestMatch_NilInputs(t *testing.T) {
 	}
 }
 
+func TestMatch_StringOps(t *testing.T) {
+	type S struct {
+		Name   string
+		Nick   *string
+		AnyStr any
+	}
+
+	nick := "superuser"
+	v := S{
+		Name:   "Alice",
+		Nick:   &nick,
+		AnyStr: "hello world",
+	}
+
+	cases := []struct {
+		name string
+		expr Expr
+		ok   bool
+	}{
+		{"PREFIX true", PREFIX("Name", "Al"), true},
+		{"PREFIX false", PREFIX("Name", "xx"), false},
+
+		{"SUFFIX true", SUFFIX("Name", "ice"), true},
+		{"SUFFIX false", SUFFIX("Name", "xx"), false},
+
+		{"CONTAINS true", CONTAINS("Name", "li"), true},
+		{"CONTAINS false", CONTAINS("Name", "zz"), false},
+
+		{"PTR PREFIX true", PREFIX("Nick", "sup"), true},
+		{"PTR SUFFIX true", SUFFIX("Nick", "user"), true},
+		{"PTR CONTAINS true", CONTAINS("Nick", "peru"), true},
+
+		{"ANY CONTAINS true", CONTAINS("AnyStr", "world"), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := Match(v, tc.expr)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ok != tc.ok {
+				t.Fatalf("Match()=%v want=%v", ok, tc.ok)
+			}
+		})
+	}
+}
+
+func TestMatch_HASNONE(t *testing.T) {
+	type S struct {
+		Tags []string
+	}
+
+	v := S{Tags: []string{"A", "B", "C"}}
+
+	cases := []struct {
+		name string
+		expr Expr
+		ok   bool
+	}{
+		{"HASNONE true", HASNONE("Tags", []string{"X", "Y"}), true},
+		{"HASNONE false", HASNONE("Tags", []string{"X", "B"}), false},
+		{"HASNONE empty RHS => true", HASNONE("Tags", []string{}), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := Match(v, tc.expr)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ok != tc.ok {
+				t.Fatalf("Match()=%v want=%v", ok, tc.ok)
+			}
+		})
+	}
+}
+
 func TestMatch_EmbeddedAndAliases(t *testing.T) {
 	type Base struct {
 		BaseID int `json:"base_id"`
@@ -1072,3 +1150,5 @@ func BenchmarkDiffFields_Heavy(b *testing.B) {
 		benchSinkInt = len(diff)
 	}
 }
+
+/**/

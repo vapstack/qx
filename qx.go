@@ -56,8 +56,22 @@ func HAS(f string, v any) Expr { return Expr{Op: OpHAS, Field: f, Value: v} }
 func HASANY(f string, v any) Expr { return Expr{Op: OpHASANY, Field: f, Value: v} }
 
 // HASNOT builds a negated slice containment expression for slice fields:
-// the field slice must NOT contain all elements from the provided value slice.
+// the field slice must not contain all elements from the provided value slice.
 func HASNOT(f string, v any) Expr { return Expr{Op: OpHAS, Not: true, Field: f, Value: v} }
+
+// HASNONE builds an expression that matches when the slice field has no intersection with the provided slice.
+// The expression evaluates to true if none of the provided values are present in the field slice.
+// An empty value slice always evaluates to true. HASNONE is logical equivalent of NOT(HASANY).
+func HASNONE(f string, v any) Expr { return Expr{Op: OpHASNONE, Field: f, Value: v} }
+
+// PREFIX builds an expression that matches when the string field starts with the provided prefix.
+func PREFIX(f string, v any) Expr { return Expr{Op: OpPREFIX, Field: f, Value: v} }
+
+// SUFFIX builds an expression that matches when the string field ends with the provided suffix.
+func SUFFIX(f string, v any) Expr { return Expr{Op: OpSUFFIX, Field: f, Value: v} }
+
+// CONTAINS builds an expression that matches when the string field contains the provided substring.
+func CONTAINS(f string, v any) Expr { return Expr{Op: OpCONTAINS, Field: f, Value: v} }
 
 // AND builds a conjunction expression combining all provided expressions.
 func AND(exprs ...Expr) Expr { return Expr{Op: OpAND, Operands: exprs} }
@@ -247,36 +261,50 @@ const (
 	OpLT
 	OpLTE
 	OpIN
-	OpHAS    // for array fields - contains at least all the provided values
-	OpHASANY // for array fields - has intersection with the provided values
+
+	OpHAS     // for array fields - contains at least all the provided values
+	OpHASANY  // for array fields - has intersection with the provided values
+	OpHASNONE // for array fields - has no intersection with provided values
+
+	OpPREFIX   // has prefix
+	OpSUFFIX   // has suffix
+	OpCONTAINS // contains substring
 )
 
 var QueryOpString = map[Op]string{
-	OpNOOP:   "NOOP",
-	OpAND:    "AND",
-	OpOR:     "OR",
-	OpEQ:     "EQ",
-	OpGT:     "GT",
-	OpGTE:    "GTE",
-	OpLT:     "LT",
-	OpLTE:    "LTE",
-	OpIN:     "IN",
-	OpHAS:    "HAS",
-	OpHASANY: "HASANY",
+	OpNOOP:     "NOOP",
+	OpAND:      "AND",
+	OpOR:       "OR",
+	OpEQ:       "EQ",
+	OpGT:       "GT",
+	OpGTE:      "GTE",
+	OpLT:       "LT",
+	OpLTE:      "LTE",
+	OpIN:       "IN",
+	OpHAS:      "HAS",
+	OpHASANY:   "HASANY",
+	OpHASNONE:  "HASNONE",
+	OpPREFIX:   "PREFIX",
+	OpSUFFIX:   "SUFFIX",
+	OpCONTAINS: "CONTAINS",
 }
 
 var QueryOpValue = map[string]Op{
-	"NOOP":   OpNOOP,
-	"AND":    OpAND,
-	"OR":     OpOR,
-	"EQ":     OpEQ,
-	"GT":     OpGT,
-	"GTE":    OpGTE,
-	"LT":     OpLT,
-	"LTE":    OpLTE,
-	"IN":     OpIN,
-	"HAS":    OpHAS,
-	"HASANY": OpHASANY,
+	"NOOP":     OpNOOP,
+	"AND":      OpAND,
+	"OR":       OpOR,
+	"EQ":       OpEQ,
+	"GT":       OpGT,
+	"GTE":      OpGTE,
+	"LT":       OpLT,
+	"LTE":      OpLTE,
+	"IN":       OpIN,
+	"HAS":      OpHAS,
+	"HASANY":   OpHASANY,
+	"HASNONE":  OpHASNONE,
+	"PREFIX":   OpPREFIX,
+	"SUFFIX":   OpSUFFIX,
+	"CONTAINS": OpCONTAINS,
 }
 
 func (q Op) String() string {

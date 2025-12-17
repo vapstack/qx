@@ -37,12 +37,19 @@ type Expr struct {
 
 ### Supported operations
 
-- Scalar comparisons: `EQ`, `GT`, `GTE`, `LT`, `LTE`
+- Scalar comparisons:
+    - `EQ`, `GT`, `GTE`, `LT`, `LTE`
+- String operations (for `string` / `*string` fields):
+    - `PREFIX` — field value starts with the provided string
+    - `SUFFIX` — field value ends with the provided string
+    - `CONTAINS` — field value contains the provided substring
 - Set / slice operations:
-  - `IN` — field value is contained in a provided slice
-  - `HAS` — slice field contains all provided values
-  - `HASANY` — slice field contains any provided value
-- Logical operations: `AND`, `OR`, `NOT`
+    - `IN` — scalar field value is contained in the provided slice
+    - `HAS` — slice field contains **all** provided values
+    - `HASANY` — slice field contains **at least one** provided value
+    - `HASNONE` — slice field contains **none** of the provided values
+- Logical operations:
+    - `AND`, `OR`, `NOT`
 
 The semantics are intentionally close to what most query engines provide.
 

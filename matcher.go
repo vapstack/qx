@@ -559,10 +559,10 @@ func (m *Matcher) compileRecursive(expr Expr) (matchFunc, error) {
 
 	switch expr.Op {
 
-	case OpEQ, OpGT, OpGTE, OpLT, OpLTE:
+	case OpEQ, OpGT, OpGTE, OpLT, OpLTE, OpPREFIX, OpSUFFIX, OpCONTAINS:
 		checker, err = compileScalarHybrid(m.srcType, expr.Op, rec.index, fieldType, expr.Value)
 
-	case OpIN, OpHAS, OpHASANY:
+	case OpIN, OpHAS, OpHASANY, OpHASNONE:
 		checker, err = compileSliceOp(expr.Op, rec.index, fieldType, expr.Value)
 
 	default:
@@ -629,6 +629,48 @@ func compileScalarCmpSlow(op Op, index []int, fieldType reflect.Type, queryVal a
 				fv = fv.Elem()
 			}
 			return isNilableAndNil(fv), nil
+		}, nil
+	}
+
+	// string operations on interface fields
+	if fieldType.Kind() == reflect.Interface && (op == OpPREFIX || op == OpSUFFIX || op == OpCONTAINS) {
+		qv, err := prepareValue(reflect.TypeOf(""), queryVal)
+		if err != nil {
+			return nil, err
+		}
+		q := qv.String()
+
+		return func(root reflect.Value) (bool, error) {
+			fv, ok := getSafeField(root, index)
+			if !ok {
+				return false, nil
+			}
+			for fv.Kind() == reflect.Interface {
+				if fv.IsNil() {
+					return false, nil
+				}
+				fv = fv.Elem()
+			}
+			if fv.Kind() == reflect.Pointer {
+				if fv.IsNil() {
+					return false, nil
+				}
+				fv = fv.Elem()
+			}
+			if fv.Kind() != reflect.String {
+				return false, nil
+			}
+			s := fv.String()
+			switch op {
+			case OpPREFIX:
+				return strings.HasPrefix(s, q), nil
+			case OpSUFFIX:
+				return strings.HasSuffix(s, q), nil
+			case OpCONTAINS:
+				return strings.Contains(s, q), nil
+			default:
+				return false, nil
+			}
 		}, nil
 	}
 
@@ -703,12 +745,24 @@ func compileScalarCmpSlow(op Op, index []int, fieldType reflect.Type, queryVal a
 			if !ok {
 				return false, nil
 			}
-			return cmpOrderedString(op, val.String(), q), nil
+			lv := val.String()
+			switch op {
+			case OpEQ, OpGT, OpGTE, OpLT, OpLTE:
+				return cmpOrderedString(op, lv, q), nil
+			case OpPREFIX:
+				return strings.HasPrefix(lv, q), nil
+			case OpSUFFIX:
+				return strings.HasSuffix(lv, q), nil
+			case OpCONTAINS:
+				return strings.Contains(lv, q), nil
+			default:
+				return false, fmt.Errorf("operation %v is not supported for string", op)
+			}
 		}, nil
 
 	case reflect.Bool:
 		if op != OpEQ {
-			return nil, fmt.Errorf("bool only EQ")
+			return nil, fmt.Errorf("operation %v is not supported for bool", op)
 		}
 		q := qv.Bool()
 		return func(root reflect.Value) (bool, error) {
@@ -745,7 +799,7 @@ func compileScalarCmpFast(op Op, off uintptr, leafType reflect.Type, queryVal an
 			}, nil
 		}
 
-		return nil, fmt.Errorf("fast EQ nil unsupported for %v", leafType)
+		return nil, fmt.Errorf("fast nil EQ is not supported for %v", leafType)
 	}
 
 	isPtrField := leafType.Kind() == reflect.Pointer
@@ -793,7 +847,18 @@ func compileScalarCmpFast(op Op, off uintptr, leafType reflect.Type, queryVal an
 		if !isPtrField {
 			return func(ptr unsafe.Pointer) (bool, error) {
 				lv := *(*string)(unsafe.Add(ptr, off))
-				return cmpOrderedString(op, lv, q), nil
+				switch op {
+				case OpEQ, OpGT, OpGTE, OpLT, OpLTE:
+					return cmpOrderedString(op, lv, q), nil
+				case OpPREFIX:
+					return strings.HasPrefix(lv, q), nil
+				case OpSUFFIX:
+					return strings.HasSuffix(lv, q), nil
+				case OpCONTAINS:
+					return strings.Contains(lv, q), nil
+				default:
+					return false, fmt.Errorf("operation %v is not supported for string", op)
+				}
 			}, nil
 		}
 		return func(ptr unsafe.Pointer) (bool, error) {
@@ -801,7 +866,18 @@ func compileScalarCmpFast(op Op, off uintptr, leafType reflect.Type, queryVal an
 			if p == nil {
 				return false, nil
 			}
-			return cmpOrderedString(op, *p, q), nil
+			switch op {
+			case OpEQ, OpGT, OpGTE, OpLT, OpLTE:
+				return cmpOrderedString(op, *p, q), nil
+			case OpPREFIX:
+				return strings.HasPrefix(*p, q), nil
+			case OpSUFFIX:
+				return strings.HasSuffix(*p, q), nil
+			case OpCONTAINS:
+				return strings.Contains(*p, q), nil
+			default:
+				return false, fmt.Errorf("operation %v is not supported for string", op)
+			}
 		}, nil
 
 	case reflect.Bool:
@@ -895,7 +971,7 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 
 	switch op {
 
-	case OpHAS, OpHASANY:
+	case OpHAS, OpHASANY, OpHASNONE:
 		if !isSliceField {
 			return nil, fmt.Errorf("%v expects a slice (or *slice) field, got %v", op, fieldType)
 		}
@@ -928,9 +1004,10 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 		return nil, fmt.Errorf("value must be a slice for %v, got %v", op, qVal.Kind())
 	}
 
-	// HAS([])    - true
-	// HASANY([]) - false
-	// IN([])     - false
+	// HAS([])     - true
+	// HASANY([])  - false
+	// HASNONE([]) - true
+	// IN([])      - false
 
 	if qVal.Len() == 0 {
 		switch op {
@@ -938,6 +1015,8 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 			return func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return true, nil }, nil
 		case OpHASANY:
 			return func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return false, nil }, nil
+		case OpHASNONE:
+			return func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return true, nil }, nil
 		case OpIN:
 			return func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return false, nil }, nil
 		}
@@ -971,10 +1050,23 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 				return false, nil
 			}
 			fieldSlice = fieldSlice.Elem()
+
+			if fieldSlice.IsNil() {
+				if op == OpHASNONE {
+					// missing/nil slice always satisfies non-empty query for HASNONE
+					return true, nil
+				}
+				// missing/nil slice cannot satisfy non-empty query for HAS/HASANY
+				return false, nil
+			}
+			fieldSlice = fieldSlice.Elem()
 		}
 		if fieldSlice.Kind() == reflect.Pointer {
 			if fieldSlice.IsNil() {
 				// nil *slice treated as empty slice
+				if op == OpHASNONE {
+					return true, nil
+				}
 				return false, nil
 			}
 			fieldSlice = fieldSlice.Elem()
@@ -984,15 +1076,20 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 			return false, nil
 		}
 		if fieldSlice.IsNil() || fieldSlice.Len() == 0 {
+			if op == OpHASNONE {
+				// empty field slice always satisfies non-empty query
+				return true, nil
+			}
 			// empty field slice cannot satisfy non-empty query
 			return false, nil
 		}
 
 		if op == OpHAS {
 			for i := 0; i < qVal.Len(); i++ {
+				sLen := fieldSlice.Len()
 				sItem := qVal.Index(i)
 				found := false
-				for j := 0; j < fieldSlice.Len(); j++ {
+				for j := 0; j < sLen; j++ {
 					if areEqual(fieldSlice.Index(j), sItem) {
 						found = true
 						break
@@ -1005,15 +1102,39 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 			return true, nil
 		}
 
-		// OpHASANY
-		for i := 0; i < qVal.Len(); i++ {
-			sItem := qVal.Index(i)
-			for j := 0; j < fieldSlice.Len(); j++ {
-				if areEqual(fieldSlice.Index(j), sItem) {
-					return true, nil
+		if op == OpHASANY {
+			l := qVal.Len()
+			if l == 0 {
+				return false, nil
+			}
+			for i := 0; i < l; i++ {
+				sLen := fieldSlice.Len()
+				sItem := qVal.Index(i)
+				for j := 0; j < sLen; j++ {
+					if areEqual(fieldSlice.Index(j), sItem) {
+						return true, nil
+					}
 				}
 			}
 		}
+
+		if op == OpHASNONE {
+			qvLen := qVal.Len()
+			if qvLen == 0 {
+				return true, nil
+			}
+			for i := 0; i < qvLen; i++ {
+				sLen := fieldSlice.Len()
+				sItem := qVal.Index(i)
+				for j := 0; j < sLen; j++ {
+					if areEqual(fieldSlice.Index(j), sItem) {
+						return false, nil
+					}
+				}
+			}
+			return true, nil
+		}
+
 		return false, nil
 	}, nil
 }
