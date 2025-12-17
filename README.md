@@ -14,8 +14,6 @@ This is intended for cases where filtering happens in memory without an index.
 
 You can use the expression layer without ever touching the matcher.
 
----
-
 ## Query Expression
 
 The expression language is intentionally simple and explicit.
@@ -94,7 +92,6 @@ Page(1, 50)
 
 See the [GoDoc](https://godoc.org/github.com/vapstack/qx) for a complete API reference.
 
----
 
 ## In-Memory Matcher
 
@@ -155,7 +152,7 @@ Matcher methods accept:
 - pointers to structs (*T)
 - interfaces wrapping either
 
-Passing a pointer enables additional fast paths based on unsafe offsets.
+Passing a pointer enables additional fast paths based on unsafe offsets.\
 Passing `nil` always results in `(false, nil)`.
 
 ### Equality semantics
