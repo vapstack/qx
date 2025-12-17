@@ -144,7 +144,10 @@ check, err := m.Compile(
     )
 )
 // ...
-match, err := check(v)
+for _, v := range values {
+    match, err := check(v)
+    // ...
+}
 ```
 
 Compiled predicates:
