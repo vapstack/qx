@@ -249,6 +249,14 @@ func usedFields(exp Expr, s *[]string) {
 	}
 }
 
+// UsedFields returns a de-duplicated list of field names referenced by the expression.
+// The returned slice includes fields from nested expressions.
+func (expr Expr) UsedFields() []string {
+	s := make([]string, 0, 8)
+	usedFields(expr, &s)
+	return s
+}
+
 const (
 	OpNOOP Op = iota
 

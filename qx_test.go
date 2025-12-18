@@ -113,6 +113,23 @@ func TestUsedFields(t *testing.T) {
 			t.Fatalf("unexpected field %q", f)
 		}
 	}
+
+	fields = q.Expr.UsedFields()
+
+	expect = map[string]bool{
+		"A": true,
+		"B": true,
+		"C": true,
+	}
+
+	if len(fields) != len(expect) {
+		t.Fatalf("unexpected field count: %v", fields)
+	}
+	for _, f := range fields {
+		if !expect[f] {
+			t.Fatalf("unexpected field %q", f)
+		}
+	}
 }
 
 func TestOpJSONRoundTrip(t *testing.T) {
