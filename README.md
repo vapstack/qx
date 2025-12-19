@@ -16,7 +16,7 @@ You can use the expression layer without ever touching the matcher.
 
 ## Query Expression
 
-The expression language is intentionally simple and explicit.
+The expression language is intentionally simple and explicit.\
 It represents filters as a tree of expressions combined with logical operators.
 
 ### Expressions
@@ -37,21 +37,30 @@ type Expr struct {
 
 ### Supported operations
 
+The semantics are intentionally close to what most query engines provide:
+
 - Scalar comparisons:
-    - `EQ`, `GT`, `GTE`, `LT`, `LTE`
+    - `EQ`, `NE` (`NOTEQ`) `GT`, `GTE`, `LT`, `LTE`
 - String operations (case-sensitive):
     - `PREFIX` — field value starts with the provided string
     - `SUFFIX` — field value ends with the provided string
     - `CONTAINS` — field value contains the provided substring
 - Set / slice operations:
     - `IN` — scalar field value is contained in the provided slice
+    - `NOTIN` — scalar field value is **not** contained in the provided slice *
     - `HAS` — slice field contains **all** provided values
     - `HASANY` — slice field contains **at least one** provided value
-    - `HASNONE` — slice field contains **none** of the provided values
+    - `HASNOT` — slice field does **not** contain **all** provided values *
+    - `HASNONE` — slice field contains **none** of the provided values *
 - Logical operations:
     - `AND`, `OR`, `NOT`
+- Syntactic sugar:
+    - `NE`, `NOTEQ` - an alias for `NOT(EQ)`
+    - `NOTIN` - an alias for `NOT(IN)`
+    - `HASNOT` - an alias for `NOT(HAS)`
+    - `HASNONE` - an alias for `NOT(HASANY)`
 
-The semantics are intentionally close to what most query engines provide.
+*Syntactic sugar operations exist only as helper functions and do not have separate opcodes.*
 
 Expressions can be constructed using helper functions with the same names:
 ```
@@ -85,20 +94,18 @@ type QX struct {
 }
 ```
 
-This makes QX suitable as a transport or intermediate representation between
-systems.
+This makes it suitable as a transport or intermediate representation between systems.
 
 ```go
 q := qx.Query(
     qx.EQ("status", "active"),
     qx.GTE("age", 21),
 ).
-By("created_at", DESC).
+By("created_at", qx.DESC).
 Page(1, 50)
 ```
 
 See the [GoDoc](https://godoc.org/github.com/vapstack/qx) for a complete API reference.
-
 
 ## In-Memory Matcher
 

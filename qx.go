@@ -55,14 +55,16 @@ func HAS(f string, v any) Expr { return Expr{Op: OpHAS, Field: f, Value: v} }
 // the field slice must share at least one element with the provided value slice.
 func HASANY(f string, v any) Expr { return Expr{Op: OpHASANY, Field: f, Value: v} }
 
-// HASNOT builds a negated slice containment expression for slice fields:
-// the field slice must not contain all elements from the provided value slice.
+// HASNOT builds a negated slice containment expression for slice fields.
+// It matches when the field slice does not contain all elements from the provided value slice
+// (i.e., at least one of the provided values is missing).
+// HASNOT is the logical equivalent of NOT(HAS(...)).
 func HASNOT(f string, v any) Expr { return Expr{Op: OpHAS, Not: true, Field: f, Value: v} }
 
-// HASNONE builds an expression that matches when the slice field has no intersection with the provided slice.
-// The expression evaluates to true if none of the provided values are present in the field slice.
-// An empty value slice always evaluates to true. HASNONE is logical equivalent of NOT(HASANY).
-func HASNONE(f string, v any) Expr { return Expr{Op: OpHASNONE, Field: f, Value: v} }
+// HASNONE builds an expression that matches when the slice field contains none of the provided values.
+// It evaluates to true only if the intersection between the field slice and the provided values is empty.
+// HASNONE is the logical equivalent of NOT(HASANY(...)).
+func HASNONE(f string, v any) Expr { return Expr{Op: OpHASANY, Not: true, Field: f, Value: v} }
 
 // PREFIX builds an expression that matches when the string field starts with the provided prefix.
 func PREFIX(f string, v any) Expr { return Expr{Op: OpPREFIX, Field: f, Value: v} }
@@ -270,9 +272,8 @@ const (
 	OpLTE
 	OpIN
 
-	OpHAS     // for array fields - contains at least all the provided values
-	OpHASANY  // for array fields - has intersection with the provided values
-	OpHASNONE // for array fields - has no intersection with provided values
+	OpHAS    // for array fields - contains at least all the provided values
+	OpHASANY // for array fields - has intersection with the provided values
 
 	OpPREFIX   // has prefix
 	OpSUFFIX   // has suffix
@@ -291,7 +292,6 @@ var QueryOpString = map[Op]string{
 	OpIN:       "IN",
 	OpHAS:      "HAS",
 	OpHASANY:   "HASANY",
-	OpHASNONE:  "HASNONE",
 	OpPREFIX:   "PREFIX",
 	OpSUFFIX:   "SUFFIX",
 	OpCONTAINS: "CONTAINS",
@@ -309,7 +309,6 @@ var QueryOpValue = map[string]Op{
 	"IN":       OpIN,
 	"HAS":      OpHAS,
 	"HASANY":   OpHASANY,
-	"HASNONE":  OpHASNONE,
 	"PREFIX":   OpPREFIX,
 	"SUFFIX":   OpSUFFIX,
 	"CONTAINS": OpCONTAINS,

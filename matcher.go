@@ -562,7 +562,7 @@ func (m *Matcher) compileRecursive(expr Expr) (matchFunc, error) {
 	case OpEQ, OpGT, OpGTE, OpLT, OpLTE, OpPREFIX, OpSUFFIX, OpCONTAINS:
 		checker, err = compileScalarHybrid(m.srcType, expr.Op, rec.index, fieldType, expr.Value)
 
-	case OpIN, OpHAS, OpHASANY, OpHASNONE:
+	case OpIN, OpHAS, OpHASANY:
 		checker, err = compileSliceOp(expr.Op, rec.index, fieldType, expr.Value)
 
 	default:
@@ -971,7 +971,7 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 
 	switch op {
 
-	case OpHAS, OpHASANY, OpHASNONE:
+	case OpHAS, OpHASANY:
 		if !isSliceField {
 			return nil, fmt.Errorf("%v expects a slice (or *slice) field, got %v", op, fieldType)
 		}
@@ -1006,7 +1006,6 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 
 	// HAS([])     - true
 	// HASANY([])  - false
-	// HASNONE([]) - true
 	// IN([])      - false
 
 	if qVal.Len() == 0 {
@@ -1015,8 +1014,6 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 			return func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return true, nil }, nil
 		case OpHASANY:
 			return func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return false, nil }, nil
-		case OpHASNONE:
-			return func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return true, nil }, nil
 		case OpIN:
 			return func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return false, nil }, nil
 		}
@@ -1052,10 +1049,6 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 			fieldSlice = fieldSlice.Elem()
 
 			if fieldSlice.IsNil() {
-				if op == OpHASNONE {
-					// missing/nil slice always satisfies non-empty query for HASNONE
-					return true, nil
-				}
 				// missing/nil slice cannot satisfy non-empty query for HAS/HASANY
 				return false, nil
 			}
@@ -1064,9 +1057,6 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 		if fieldSlice.Kind() == reflect.Pointer {
 			if fieldSlice.IsNil() {
 				// nil *slice treated as empty slice
-				if op == OpHASNONE {
-					return true, nil
-				}
 				return false, nil
 			}
 			fieldSlice = fieldSlice.Elem()
@@ -1076,10 +1066,6 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 			return false, nil
 		}
 		if fieldSlice.IsNil() || fieldSlice.Len() == 0 {
-			if op == OpHASNONE {
-				// empty field slice always satisfies non-empty query
-				return true, nil
-			}
 			// empty field slice cannot satisfy non-empty query
 			return false, nil
 		}
@@ -1116,23 +1102,6 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 					}
 				}
 			}
-		}
-
-		if op == OpHASNONE {
-			qvLen := qVal.Len()
-			if qvLen == 0 {
-				return true, nil
-			}
-			for i := 0; i < qvLen; i++ {
-				sLen := fieldSlice.Len()
-				sItem := qVal.Index(i)
-				for j := 0; j < sLen; j++ {
-					if areEqual(fieldSlice.Index(j), sItem) {
-						return false, nil
-					}
-				}
-			}
-			return true, nil
 		}
 
 		return false, nil
