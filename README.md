@@ -39,7 +39,7 @@ type Expr struct {
 
 - Scalar comparisons:
     - `EQ`, `GT`, `GTE`, `LT`, `LTE`
-- String operations (for `string` / `*string` fields):
+- String operations (case-sensitive):
     - `PREFIX` — field value starts with the provided string
     - `SUFFIX` — field value ends with the provided string
     - `CONTAINS` — field value contains the provided substring
@@ -167,7 +167,7 @@ Passing `nil` always results in `(false, nil)`.
 
 ### Equality semantics
 
-Equality is defined in terms of `data`, not pointer identity:
+Equality is defined in terms of data, not pointer identity:
 - pointers are compared by the values they point to
 - interfaces are unwrapped
 - structs are compared field-by-field
