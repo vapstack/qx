@@ -7,8 +7,7 @@ import (
 )
 
 // Query creates a new QX and sets the provided expressions as part of the root AND group.
-// With zero expressions it returns an empty query; with one expression it becomes the root;
-// with multiple expressions they are combined with AND.
+// With zero expressions it returns an empty query. With one expression it becomes the root.
 func Query(expressions ...Expr) *QX {
 	if len(expressions) == 0 {
 		return new(QX)

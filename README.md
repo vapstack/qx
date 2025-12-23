@@ -7,6 +7,11 @@
 type-agnostic form.  
 Its primary purpose is to act as a minimal **query / filter AST** (expressions, ordering, pagination)
 that can be consumed by other packages (databases, indexes, storage engines).
+It does not support projections, joins, or aggregation functions as its main purpose is filtering. 
+User-defined functions may be implemented in the future, but currently there are no plans for that.
+
+There is no built-in query normalization (NNF, De Morgan) because many engines 
+implement their own optimization strategies based on their internal layout.
 
 As a secondary feature, it also provides a **high-performance in-memory matcher**:
 a fast evaluator that applies expressions to Go structs using reflection and unsafe optimizations.  
