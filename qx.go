@@ -141,6 +141,36 @@ const (
 	OrderByArrayCount
 )
 
+// AND combines the current expression with exprs using logical AND.
+func (qx *QX) AND(exprs ...Expr) *QX {
+	if qx.Expr.Op == OpNOOP {
+		qx.Expr = AND(exprs...)
+	} else if qx.Expr.Op == OpAND {
+		qx.Expr.Operands = append(qx.Expr.Operands, exprs...)
+	} else {
+		expr := Expr{Op: OpAND, Operands: make([]Expr, 0, len(exprs)+1)}
+		expr.Operands = append(expr.Operands, qx.Expr)
+		expr.Operands = append(expr.Operands, exprs...)
+		qx.Expr = expr
+	}
+	return qx
+}
+
+// OR combines the current expression with exprs using logical OR.
+func (qx *QX) OR(exprs ...Expr) *QX {
+	if qx.Expr.Op == OpNOOP {
+		qx.Expr = OR(exprs...)
+	} else if qx.Expr.Op == OpOR {
+		qx.Expr.Operands = append(qx.Expr.Operands, exprs...)
+	} else {
+		expr := Expr{Op: OpOR, Operands: make([]Expr, 0, len(exprs)+1)}
+		expr.Operands = append(expr.Operands, qx.Expr)
+		expr.Operands = append(expr.Operands, exprs...)
+		qx.Expr = expr
+	}
+	return qx
+}
+
 // CacheKey sets an optional cache key associated with the query.
 func (qx *QX) CacheKey(key string) *QX {
 	qx.Key = key
