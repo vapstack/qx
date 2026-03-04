@@ -76,6 +76,38 @@ func TestMatch_ScalarsAndLogic(t *testing.T) {
 	}
 }
 
+func TestMatch_NotOnLogicalGroups(t *testing.T) {
+	type S struct {
+		A int
+		B int
+	}
+
+	v := S{A: 1, B: 2}
+
+	cases := []struct {
+		name string
+		expr Expr
+		ok   bool
+	}{
+		{"NOT over AND (true->false)", NOT(AND(EQ("A", 1), EQ("B", 2))), false},
+		{"NOT over AND (false->true)", NOT(AND(EQ("A", 1), EQ("B", 9))), true},
+		{"NOT over OR (true->false)", NOT(OR(EQ("A", 1), EQ("B", 9))), false},
+		{"NOT over OR (false->true)", NOT(OR(EQ("A", 7), EQ("B", 9))), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Match(v, tc.expr)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.ok {
+				t.Fatalf("Match()=%v, want %v", got, tc.ok)
+			}
+		})
+	}
+}
+
 func TestMatch_DataEquality(t *testing.T) {
 	type Profile struct {
 		Level int
@@ -251,6 +283,9 @@ func TestMatch_Errors_TypeAndAccess(t *testing.T) {
 
 		// unsupported op/type combo must fail
 		{"GT on slice must fail", GT("Tags", 5)},
+		{"PREFIX on int must fail", PREFIX("Age", 1)},
+		{"SUFFIX on int must fail", SUFFIX("Age", 1)},
+		{"CONTAINS on int must fail", CONTAINS("Age", 1)},
 
 		// IN/HAS/HASANY require slice query values
 		{"IN with scalar RHS must fail", IN("ID", 123)},

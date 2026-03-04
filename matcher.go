@@ -505,72 +505,71 @@ func (m *Matcher) Compile(expr Expr) (MatchFunc, error) {
 }
 
 func (m *Matcher) compileRecursive(expr Expr) (matchFunc, error) {
+	var checker matchFunc
+	var err error
 
 	if expr.Op == OpAND || expr.Op == OpOR {
 
 		checks := make([]matchFunc, 0, len(expr.Operands))
 		for _, sub := range expr.Operands {
-			c, err := m.compileRecursive(sub)
-			if err != nil {
-				return nil, err
+			c, e := m.compileRecursive(sub)
+			if e != nil {
+				return nil, e
 			}
 			checks = append(checks, c)
 		}
 
 		if expr.Op == OpAND {
-			return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+			checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
 				for _, check := range checks {
-					ok, err := check(ptr, root)
-					if err != nil {
-						return false, err
+					ok, e := check(ptr, root)
+					if e != nil {
+						return false, e
 					}
 					if !ok {
 						return false, nil
 					}
 				}
 				return true, nil
-			}, nil
+			}
+		} else {
+			// OpOR
+			checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+				for _, check := range checks {
+					ok, e := check(ptr, root)
+					if e != nil {
+						return false, e
+					}
+					if ok {
+						return true, nil
+					}
+				}
+				return false, nil
+			}
+		}
+	} else {
+		rec, ok := m.recMap[expr.Field]
+		if !ok {
+			return nil, fmt.Errorf("unknown field: %s", expr.Field)
+		}
+		field := m.srcType.FieldByIndex(rec.index)
+		fieldType := field.Type
+
+		switch expr.Op {
+
+		case OpEQ, OpGT, OpGTE, OpLT, OpLTE, OpPREFIX, OpSUFFIX, OpCONTAINS:
+			checker, err = compileScalarHybrid(m.srcType, expr.Op, rec.index, fieldType, expr.Value)
+
+		case OpIN, OpHAS, OpHASANY:
+			checker, err = compileSliceOp(expr.Op, rec.index, fieldType, expr.Value)
+
+		default:
+			return nil, fmt.Errorf("unsupported op: %v", expr.Op)
 		}
 
-		// OpOR
-		return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
-			for _, check := range checks {
-				ok, err := check(ptr, root)
-				if err != nil {
-					return false, err
-				}
-				if ok {
-					return true, nil
-				}
-			}
-			return false, nil
-		}, nil
-	}
-
-	rec, ok := m.recMap[expr.Field]
-	if !ok {
-		return nil, fmt.Errorf("unknown field: %s", expr.Field)
-	}
-	field := m.srcType.FieldByIndex(rec.index)
-	fieldType := field.Type
-
-	var checker matchFunc
-	var err error
-
-	switch expr.Op {
-
-	case OpEQ, OpGT, OpGTE, OpLT, OpLTE, OpPREFIX, OpSUFFIX, OpCONTAINS:
-		checker, err = compileScalarHybrid(m.srcType, expr.Op, rec.index, fieldType, expr.Value)
-
-	case OpIN, OpHAS, OpHASANY:
-		checker, err = compileSliceOp(expr.Op, rec.index, fieldType, expr.Value)
-
-	default:
-		return nil, fmt.Errorf("unsupported op: %v", expr.Op)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("compile error for field '%s': %w", expr.Field, err)
+		if err != nil {
+			return nil, fmt.Errorf("compile error for field '%s': %w", expr.Field, err)
+		}
 	}
 
 	if expr.Not {
@@ -709,6 +708,9 @@ func compileScalarCmpSlow(op Op, index []int, fieldType reflect.Type, queryVal a
 	switch cmpType.Kind() {
 
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		q := qv.Int()
 		return func(root reflect.Value) (bool, error) {
 			val, ok := getVal(root)
@@ -719,6 +721,9 @@ func compileScalarCmpSlow(op Op, index []int, fieldType reflect.Type, queryVal a
 		}, nil
 
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		q := qv.Uint()
 		return func(root reflect.Value) (bool, error) {
 			val, ok := getVal(root)
@@ -729,6 +734,9 @@ func compileScalarCmpSlow(op Op, index []int, fieldType reflect.Type, queryVal a
 		}, nil
 
 	case reflect.Float32, reflect.Float64:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		q := qv.Float()
 		return func(root reflect.Value) (bool, error) {
 			val, ok := getVal(root)
@@ -816,30 +824,66 @@ func compileScalarCmpFast(op Op, off uintptr, leafType reflect.Type, queryVal an
 	switch cmpType.Kind() {
 
 	case reflect.Int:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastInt[int](op, off, qv.Int(), isPtrField), nil
 	case reflect.Int8:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastInt[int8](op, off, qv.Int(), isPtrField), nil
 	case reflect.Int16:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastInt[int16](op, off, qv.Int(), isPtrField), nil
 	case reflect.Int32:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastInt[int32](op, off, qv.Int(), isPtrField), nil
 	case reflect.Int64:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastInt[int64](op, off, qv.Int(), isPtrField), nil
 
 	case reflect.Uint:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastUint[uint](op, off, qv.Uint(), isPtrField), nil
 	case reflect.Uint8:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastUint[uint8](op, off, qv.Uint(), isPtrField), nil
 	case reflect.Uint16:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastUint[uint16](op, off, qv.Uint(), isPtrField), nil
 	case reflect.Uint32:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastUint[uint32](op, off, qv.Uint(), isPtrField), nil
 	case reflect.Uint64:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastUint[uint64](op, off, qv.Uint(), isPtrField), nil
 
 	case reflect.Float32:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastFloat[float32](op, off, qv.Float(), isPtrField), nil
 	case reflect.Float64:
+		if !isOrderedOp(op) {
+			return nil, fmt.Errorf("operation %v is not supported for %v", op, cmpType)
+		}
 		return makeFastFloat[float64](op, off, qv.Float(), isPtrField), nil
 
 	case reflect.String:
@@ -1305,6 +1349,15 @@ func isNilableAndNil(v reflect.Value) bool {
 	switch v.Kind() {
 	case reflect.Interface, reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
 		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func isOrderedOp(op Op) bool {
+	switch op {
+	case OpEQ, OpGT, OpGTE, OpLT, OpLTE:
+		return true
 	default:
 		return false
 	}
