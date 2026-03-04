@@ -1,6 +1,7 @@
 package qx
 
 import (
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -129,6 +130,43 @@ func TestMatch_DataEquality(t *testing.T) {
 	}
 	if !ok {
 		t.Fatalf("expected data-equality match for struct with pointer fields")
+	}
+}
+
+func TestMatch_DataEquality_PointerNaNIdentity(t *testing.T) {
+	type Profile struct {
+		Rank *float64
+	}
+	type S struct {
+		Profile Profile
+	}
+
+	n1 := math.NaN()
+	p1 := &n1
+
+	v := S{
+		Profile: Profile{Rank: p1},
+	}
+
+	// Same pointer must be equal (reflect.DeepEqual semantics for pointers).
+	ok, err := Match(v, EQ("Profile", Profile{Rank: p1}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected match for same pointer to NaN")
+	}
+
+	// Different pointers with NaN payload must not be equal.
+	n2 := math.NaN()
+	p2 := &n2
+
+	ok, err = Match(v, EQ("Profile", Profile{Rank: p2}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected mismatch for different pointers to NaN")
 	}
 }
 

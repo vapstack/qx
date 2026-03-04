@@ -111,6 +111,7 @@ func typeMatcher(rt reflect.Type) (*Matcher, error) {
 }
 
 type matchFunc func(ptr unsafe.Pointer, root reflect.Value) (bool, error)
+type typeEqFunc func(v1, v2 reflect.Value) bool
 
 type fieldRec struct {
 	index []int
@@ -784,6 +785,16 @@ func compileScalarCmpSlow(op Op, index []int, fieldType reflect.Type, queryVal a
 
 	// fallback
 	if op == OpEQ {
+		eqFast, hasFast := getTypeEqFunc(cmpType)
+		if hasFast {
+			return func(root reflect.Value) (bool, error) {
+				val, ok := getVal(root)
+				if !ok {
+					return false, nil
+				}
+				return eqFast(val, qv), nil
+			}, nil
+		}
 		return func(root reflect.Value) (bool, error) {
 			val, ok := getVal(root)
 			if !ok {
@@ -1231,11 +1242,170 @@ func prepareValue(targetType reflect.Type, raw any) (reflect.Value, error) {
 	return reflect.Value{}, fmt.Errorf("type mismatch: field is %v, value is %v", targetType, rv.Type())
 }
 
+var typeEqCache sync.Map
+
+type typeEqCacheRec struct {
+	fn typeEqFunc
+	ok bool
+}
+
+func getTypeEqFunc(t reflect.Type) (typeEqFunc, bool) {
+	if v, ok := typeEqCache.Load(t); ok {
+		rec := v.(typeEqCacheRec)
+		return rec.fn, rec.ok
+	}
+	fn, ok := buildTypeEqFunc(t)
+	typeEqCache.Store(t, typeEqCacheRec{fn: fn, ok: ok})
+	return fn, ok
+}
+
+func buildTypeEqFunc(t reflect.Type) (typeEqFunc, bool) {
+	switch t.Kind() {
+	case reflect.Bool:
+		return func(v1, v2 reflect.Value) bool { return v1.Bool() == v2.Bool() }, true
+
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return func(v1, v2 reflect.Value) bool { return v1.Int() == v2.Int() }, true
+
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return func(v1, v2 reflect.Value) bool { return v1.Uint() == v2.Uint() }, true
+
+	case reflect.Float32, reflect.Float64:
+		return func(v1, v2 reflect.Value) bool { return v1.Float() == v2.Float() }, true
+
+	case reflect.Complex64, reflect.Complex128:
+		return func(v1, v2 reflect.Value) bool { return v1.Complex() == v2.Complex() }, true
+
+	case reflect.String:
+		return func(v1, v2 reflect.Value) bool { return v1.String() == v2.String() }, true
+
+	case reflect.Pointer:
+		elemKind := t.Elem().Kind()
+		switch elemKind {
+		case reflect.Bool:
+			return func(v1, v2 reflect.Value) bool {
+				if v1.IsNil() || v2.IsNil() {
+					return v1.IsNil() == v2.IsNil()
+				}
+				if v1.Pointer() == v2.Pointer() {
+					return true
+				}
+				return v1.Elem().Bool() == v2.Elem().Bool()
+			}, true
+
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return func(v1, v2 reflect.Value) bool {
+				if v1.IsNil() || v2.IsNil() {
+					return v1.IsNil() == v2.IsNil()
+				}
+				if v1.Pointer() == v2.Pointer() {
+					return true
+				}
+				return v1.Elem().Int() == v2.Elem().Int()
+			}, true
+
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			return func(v1, v2 reflect.Value) bool {
+				if v1.IsNil() || v2.IsNil() {
+					return v1.IsNil() == v2.IsNil()
+				}
+				if v1.Pointer() == v2.Pointer() {
+					return true
+				}
+				return v1.Elem().Uint() == v2.Elem().Uint()
+			}, true
+
+		case reflect.Float32, reflect.Float64:
+			return func(v1, v2 reflect.Value) bool {
+				if v1.IsNil() || v2.IsNil() {
+					return v1.IsNil() == v2.IsNil()
+				}
+				if v1.Pointer() == v2.Pointer() {
+					return true
+				}
+				return v1.Elem().Float() == v2.Elem().Float()
+			}, true
+
+		case reflect.Complex64, reflect.Complex128:
+			return func(v1, v2 reflect.Value) bool {
+				if v1.IsNil() || v2.IsNil() {
+					return v1.IsNil() == v2.IsNil()
+				}
+				if v1.Pointer() == v2.Pointer() {
+					return true
+				}
+				return v1.Elem().Complex() == v2.Elem().Complex()
+			}, true
+
+		case reflect.String:
+			return func(v1, v2 reflect.Value) bool {
+				if v1.IsNil() || v2.IsNil() {
+					return v1.IsNil() == v2.IsNil()
+				}
+				if v1.Pointer() == v2.Pointer() {
+					return true
+				}
+				return v1.Elem().String() == v2.Elem().String()
+			}, true
+		}
+
+		return nil, false
+
+	case reflect.Array:
+		elemFn, ok := buildTypeEqFunc(t.Elem())
+		if !ok {
+			return nil, false
+		}
+		n := t.Len()
+		return func(v1, v2 reflect.Value) bool {
+			for i := 0; i < n; i++ {
+				if !elemFn(v1.Index(i), v2.Index(i)) {
+					return false
+				}
+			}
+			return true
+		}, true
+
+	case reflect.Struct:
+		n := t.NumField()
+		fns := make([]typeEqFunc, n)
+		for i := 0; i < n; i++ {
+			fn, ok := buildTypeEqFunc(t.Field(i).Type)
+			if !ok {
+				return nil, false
+			}
+			fns[i] = fn
+		}
+		return func(v1, v2 reflect.Value) bool {
+			for i := 0; i < n; i++ {
+				if !fns[i](v1.Field(i), v2.Field(i)) {
+					return false
+				}
+			}
+			return true
+		}, true
+	}
+
+	return nil, false
+}
+
+var typeNeedsDeepEqualCache sync.Map
+
 // typeNeedsDeepEqual returns true if comparing values of this type by reflect.Value.Equal
 // would likely give "identity" semantics (e.g. pointers inside structs) instead of data semantics.
 // Keep it cheap: as soon as we see pointer/interface/slice/map/func/chan we return true.
 // Don't descend on pointers (avoids cycles and extra work).
 func typeNeedsDeepEqual(t reflect.Type) bool {
+	if v, ok := typeNeedsDeepEqualCache.Load(t); ok {
+		return v.(bool)
+	}
+
+	need := typeNeedsDeepEqualSlow(t)
+	typeNeedsDeepEqualCache.Store(t, need)
+	return need
+}
+
+func typeNeedsDeepEqualSlow(t reflect.Type) bool {
 	switch t.Kind() {
 	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Func, reflect.Chan:
 		return true
