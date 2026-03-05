@@ -510,6 +510,48 @@ func TestMatch_FastVsSlowPathConsistency(t *testing.T) {
 	}
 }
 
+func TestMatch_FastVsSlowPathConsistency_SliceOps(t *testing.T) {
+	type S struct {
+		Tags    []string
+		TagsPtr *[]string
+	}
+
+	tags := []string{"A", "B", "C"}
+	s := S{
+		Tags:    tags,
+		TagsPtr: &tags,
+	}
+
+	exps := []Expr{
+		HAS("Tags", []string{"A", "C"}),
+		HASANY("Tags", []string{"X", "B"}),
+		HAS("TagsPtr", []string{"A", "B"}),
+		HASANY("TagsPtr", []string{"Y", "C"}),
+	}
+
+	m, err := MatcherFor[S]()
+	if err != nil {
+		t.Fatalf("MatcherFor error: %v", err)
+	}
+
+	for _, e := range exps {
+		fn, err := m.Compile(e)
+		if err != nil {
+			t.Fatalf("compile error for %v: %v", e, err)
+		}
+
+		ok1, err1 := fn(&s)
+		ok2, err2 := fn(s)
+
+		if err1 != nil || err2 != nil {
+			t.Fatalf("unexpected errors: err1=%v err2=%v", err1, err2)
+		}
+		if ok1 != ok2 {
+			t.Fatalf("fast/slow mismatch for %v: ptr=%v val=%v", e, ok1, ok2)
+		}
+	}
+}
+
 func TestAliasCollisions_MustFail(t *testing.T) {
 
 	// alias collisions must be rejected (fail-fast)

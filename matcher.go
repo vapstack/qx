@@ -559,10 +559,10 @@ func (m *Matcher) compileRecursive(expr Expr) (matchFunc, error) {
 		switch expr.Op {
 
 		case OpEQ, OpGT, OpGTE, OpLT, OpLTE, OpPREFIX, OpSUFFIX, OpCONTAINS:
-			checker, err = compileScalarHybrid(m.srcType, expr.Op, rec.index, fieldType, expr.Value)
+			checker, err = compileScalarHybrid(expr.Op, rec.index, m.srcType, fieldType, expr.Value)
 
 		case OpIN, OpHAS, OpHASANY:
-			checker, err = compileSliceOp(expr.Op, rec.index, fieldType, expr.Value)
+			checker, err = compileSliceOp(expr.Op, rec.index, m.srcType, fieldType, expr.Value)
 
 		default:
 			return nil, fmt.Errorf("unsupported op: %v", expr.Op)
@@ -584,7 +584,7 @@ func (m *Matcher) compileRecursive(expr Expr) (matchFunc, error) {
 	return checker, nil
 }
 
-func compileScalarHybrid(rootType reflect.Type, op Op, index []int, fieldType reflect.Type, queryVal any) (matchFunc, error) {
+func compileScalarHybrid(op Op, index []int, rootType, fieldType reflect.Type, queryVal any) (matchFunc, error) {
 
 	slow, err := compileScalarCmpSlow(op, index, fieldType, queryVal)
 	if err != nil {
@@ -1009,7 +1009,7 @@ func makeFastFloat[T ~float32 | ~float64](op Op, off uintptr, qVal float64, isPt
 	}
 }
 
-func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (matchFunc, error) {
+func compileSliceOp(op Op, index []int, rootType, fieldType reflect.Type, queryVal any) (matchFunc, error) {
 
 	isSliceField := false
 
@@ -1089,8 +1089,50 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 		}, nil
 	}
 
-	// HAS / HASANY
-	return func(_ unsafe.Pointer, root reflect.Value) (bool, error) {
+	evalSliceOp := func(fieldSlice reflect.Value) bool {
+		if fieldSlice.IsNil() || fieldSlice.Len() == 0 {
+			// empty field slice cannot satisfy non-empty query
+			return false
+		}
+
+		if op == OpHAS {
+			for i := 0; i < qVal.Len(); i++ {
+				sLen := fieldSlice.Len()
+				sItem := qVal.Index(i)
+				found := false
+				for j := 0; j < sLen; j++ {
+					if areEqual(fieldSlice.Index(j), sItem) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+			}
+			return true
+		}
+
+		// OpHASANY
+		l := qVal.Len()
+		if l == 0 {
+			return false
+		}
+		for i := 0; i < l; i++ {
+			sLen := fieldSlice.Len()
+			sItem := qVal.Index(i)
+			for j := 0; j < sLen; j++ {
+				if areEqual(fieldSlice.Index(j), sItem) {
+					return true
+				}
+			}
+		}
+
+		return false
+	}
+
+	// HAS / HASANY slow path
+	slow := func(root reflect.Value) (bool, error) {
 		fieldSlice, ok := getSafeField(root, index)
 		if !ok {
 			return false, nil
@@ -1120,47 +1162,50 @@ func compileSliceOp(op Op, index []int, fieldType reflect.Type, queryVal any) (m
 			// should not happen with compile-time checks, but keep safe
 			return false, nil
 		}
-		if fieldSlice.IsNil() || fieldSlice.Len() == 0 {
-			// empty field slice cannot satisfy non-empty query
-			return false, nil
-		}
+		return evalSliceOp(fieldSlice), nil
+	}
 
-		if op == OpHAS {
-			for i := 0; i < qVal.Len(); i++ {
-				sLen := fieldSlice.Len()
-				sItem := qVal.Index(i)
-				found := false
-				for j := 0; j < sLen; j++ {
-					if areEqual(fieldSlice.Index(j), sItem) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return false, nil
-				}
-			}
-			return true, nil
-		}
+	fast, hasFast := compileSliceFast(index, rootType, fieldType, evalSliceOp)
+	if !hasFast {
+		return func(_ unsafe.Pointer, root reflect.Value) (bool, error) {
+			return slow(root)
+		}, nil
+	}
 
-		if op == OpHASANY {
-			l := qVal.Len()
-			if l == 0 {
+	return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+		if ptr != nil {
+			return fast(ptr)
+		}
+		return slow(root)
+	}, nil
+}
+
+func compileSliceFast(index []int, rootType, fieldType reflect.Type, evalFn func(fieldSlice reflect.Value) bool) (func(unsafe.Pointer) (bool, error), bool) {
+	off, leafType, ok := calcFastOffset(rootType, index)
+	if !ok || leafType != fieldType {
+		return nil, false
+	}
+
+	if fieldType.Kind() == reflect.Slice {
+		return func(ptr unsafe.Pointer) (bool, error) {
+			fieldSlice := reflect.NewAt(fieldType, unsafe.Add(ptr, off)).Elem()
+			return evalFn(fieldSlice), nil
+		}, true
+	}
+
+	if fieldType.Kind() == reflect.Pointer && fieldType.Elem().Kind() == reflect.Slice {
+		sliceType := fieldType.Elem()
+		return func(ptr unsafe.Pointer) (bool, error) {
+			p := *(*unsafe.Pointer)(unsafe.Add(ptr, off))
+			if p == nil {
 				return false, nil
 			}
-			for i := 0; i < l; i++ {
-				sLen := fieldSlice.Len()
-				sItem := qVal.Index(i)
-				for j := 0; j < sLen; j++ {
-					if areEqual(fieldSlice.Index(j), sItem) {
-						return true, nil
-					}
-				}
-			}
-		}
+			fieldSlice := reflect.NewAt(sliceType, p).Elem()
+			return evalFn(fieldSlice), nil
+		}, true
+	}
 
-		return false, nil
-	}, nil
+	return nil, false
 }
 
 func calcFastOffset(t reflect.Type, index []int) (off uintptr, leaf reflect.Type, ok bool) {
