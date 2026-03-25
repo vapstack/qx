@@ -83,6 +83,80 @@ func TestQXPagePanics(t *testing.T) {
 	Query().Page(0, 10)
 }
 
+func TestNormalizeNil(t *testing.T) {
+	if Normalize(nil) != nil {
+		t.Fatalf("Normalize(nil) must return nil")
+	}
+}
+
+func TestNormalizeFlattensSameLogicalGroups(t *testing.T) {
+	q := Query(
+		AND(
+			EQ("A", 1),
+			AND(
+				EQ("B", 2),
+				AND(EQ("C", 3)),
+			),
+			AND(),
+		),
+	).
+		CacheKey("k").
+		By("A", ASC).
+		Skip(5).
+		Max(10)
+
+	Normalize(q)
+
+	if q.Key != "k" || q.Offset != 5 || q.Limit != 10 || len(q.Order) != 1 {
+		t.Fatalf("Normalize must not touch query metadata: %+v", q)
+	}
+
+	if q.Expr.Op != OpAND {
+		t.Fatalf("root op = %v, want AND", q.Expr.Op)
+	}
+	if got := len(q.Expr.Operands); got != 3 {
+		t.Fatalf("operand count = %d, want 3", got)
+	}
+	if q.Expr.Operands[0].Field != "A" || q.Expr.Operands[1].Field != "B" || q.Expr.Operands[2].Field != "C" {
+		t.Fatalf("unexpected flattened operands: %+v", q.Expr.Operands)
+	}
+}
+
+func TestNormalizeCollapsesSingletonLogicalGroup(t *testing.T) {
+	q := Query(AND(AND(EQ("A", 1))))
+
+	Normalize(q)
+
+	if q.Expr.Op != OpEQ || q.Expr.Field != "A" || q.Expr.Value != 1 || q.Expr.Not {
+		t.Fatalf("unexpected collapsed expression: %+v", q.Expr)
+	}
+}
+
+func TestNormalizeCollapsesSingletonLogicalGroupWithNot(t *testing.T) {
+	q := Query(NOT(AND(NE("A", 1))))
+
+	Normalize(q)
+
+	if q.Expr.Op != OpEQ || q.Expr.Field != "A" || q.Expr.Value != 1 || q.Expr.Not {
+		t.Fatalf("expected NOT(AND(NE)) to collapse into EQ, got %+v", q.Expr)
+	}
+}
+
+func TestNormalizeKeepsINSemanticsUntouched(t *testing.T) {
+	var nilInt *int
+	q := Query(NOTIN("A", []any{nilInt}))
+
+	Normalize(q)
+
+	if q.Expr.Op != OpIN || !q.Expr.Not || q.Expr.Field != "A" {
+		t.Fatalf("unexpected normalized expression: %+v", q.Expr)
+	}
+	v, ok := q.Expr.Value.([]any)
+	if !ok || len(v) != 1 || v[0] != nilInt {
+		t.Fatalf("unexpected normalized value: %#v", q.Expr.Value)
+	}
+}
+
 func TestUsedFields(t *testing.T) {
 	q := Query(
 		AND(

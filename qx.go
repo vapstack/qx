@@ -370,3 +370,65 @@ func (q Op) MarshalJSON() ([]byte, error) {
 	}
 	return []byte(strconv.Quote(v)), nil
 }
+
+// Normalize applies only semantics-preserving structural rewrites to qx in place.
+// It avoids backend-specific rewrites such as De Morgan, NNF/DNF/CNF conversion, or reordering.
+// The function keeps query metadata, ordering and pagination intact and returns qx.
+func Normalize(qx *QX) *QX {
+	if qx == nil {
+		return nil
+	}
+	normalizeExpr(&qx.Expr)
+	return qx
+}
+
+func normalizeExpr(expr *Expr) {
+	switch expr.Op {
+	case OpAND, OpOR:
+		for i := range expr.Operands {
+			normalizeExpr(&expr.Operands[i])
+		}
+
+		total := len(expr.Operands)
+		flatten := false
+
+		for i := range expr.Operands {
+			sub := expr.Operands[i]
+			if sub.Op == expr.Op && !sub.Not {
+				flatten = true
+				total += len(sub.Operands) - 1
+			}
+		}
+
+		if flatten {
+			src := expr.Operands
+			var dst []Expr
+
+			if total <= cap(src) {
+				dst = src[:total]
+			} else {
+				dst = make([]Expr, total)
+			}
+
+			write := total
+			for i := len(src) - 1; i >= 0; i-- {
+				sub := src[i]
+				if sub.Op == expr.Op && !sub.Not {
+					write -= len(sub.Operands)
+					copy(dst[write:], sub.Operands)
+				} else {
+					write--
+					dst[write] = sub
+				}
+			}
+
+			expr.Operands = dst[write:]
+		}
+
+		if len(expr.Operands) == 1 {
+			only := expr.Operands[0]
+			only.Not = only.Not != expr.Not
+			*expr = only
+		}
+	}
+}

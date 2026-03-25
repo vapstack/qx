@@ -210,6 +210,79 @@ func TestMatch_SliceOpsSemantics(t *testing.T) {
 	}
 }
 
+func TestMatch_INSingletonMatchesEQ(t *testing.T) {
+	role := "admin"
+
+	type S struct {
+		ID      int
+		RolePtr *string
+	}
+
+	cases := []struct {
+		name string
+		v    S
+		in   Expr
+		eq   Expr
+	}{
+		{
+			name: "scalar singleton",
+			v:    S{ID: 42},
+			in:   IN("ID", []int64{42}),
+			eq:   EQ("ID", int64(42)),
+		},
+		{
+			name: "pointer singleton nil",
+			v:    S{RolePtr: nil},
+			in:   IN("RolePtr", []any{nil}),
+			eq:   EQ("RolePtr", nil),
+		},
+		{
+			name: "pointer singleton value",
+			v:    S{RolePtr: &role},
+			in:   IN("RolePtr", []string{"admin"}),
+			eq:   EQ("RolePtr", "admin"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotIN, err := Match(tc.v, tc.in)
+			if err != nil {
+				t.Fatalf("IN unexpected error: %v", err)
+			}
+			gotEQ, err := Match(tc.v, tc.eq)
+			if err != nil {
+				t.Fatalf("EQ unexpected error: %v", err)
+			}
+			if gotIN != gotEQ {
+				t.Fatalf("IN=%v EQ=%v", gotIN, gotEQ)
+			}
+		})
+	}
+}
+
+func TestMatch_INTypeMismatchErrors(t *testing.T) {
+	u := User{ID: 555}
+
+	cases := []struct {
+		name string
+		expr Expr
+	}{
+		{"singleton incompatible type must fail", IN("ID", []any{"not-an-int"})},
+		{"typed nil pointer for scalar field must fail", IN("ID", []any{(*int)(nil)})},
+		{"mixed list with incompatible type must fail", IN("ID", []any{555, "bad"})},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Match(u, tc.expr)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+		})
+	}
+}
+
 func TestMatch_SliceOpsWithNilField(t *testing.T) {
 	// nil slice field should behave like empty
 	u := User{

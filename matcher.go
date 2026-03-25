@@ -1075,18 +1075,7 @@ func compileSliceOp(op Op, index []int, rootType, fieldType reflect.Type, queryV
 	}
 
 	if op == OpIN {
-		return func(_ unsafe.Pointer, root reflect.Value) (bool, error) {
-			fv, ok := getSafeField(root, index)
-			if !ok {
-				return false, nil
-			}
-			for i := 0; i < qVal.Len(); i++ {
-				if areEqual(fv, qVal.Index(i)) {
-					return true, nil
-				}
-			}
-			return false, nil
-		}, nil
+		return compileStrictIN(index, rootType, fieldType, qVal)
 	}
 
 	evalSliceOp := func(fieldSlice reflect.Value) bool {
@@ -1177,6 +1166,38 @@ func compileSliceOp(op Op, index []int, rootType, fieldType reflect.Type, queryV
 			return fast(ptr)
 		}
 		return slow(root)
+	}, nil
+}
+
+func compileStrictIN(index []int, rootType, fieldType reflect.Type, qVal reflect.Value) (matchFunc, error) {
+	if qVal.Len() == 1 {
+		check, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(0).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 0: %w", err)
+		}
+		return check, nil
+	}
+
+	checks := make([]matchFunc, 0, qVal.Len())
+	for i := 0; i < qVal.Len(); i++ {
+		check, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(i).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index %d: %w", i, err)
+		}
+		checks = append(checks, check)
+	}
+
+	return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+		for _, check := range checks {
+			ok, err := check(ptr, root)
+			if err != nil {
+				return false, err
+			}
+			if ok {
+				return true, nil
+			}
+		}
+		return false, nil
 	}, nil
 }
 
