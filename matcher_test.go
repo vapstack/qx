@@ -283,6 +283,38 @@ func TestMatch_INTypeMismatchErrors(t *testing.T) {
 	}
 }
 
+func TestMatch_INStringPointerWithNilFallback(t *testing.T) {
+	type S struct {
+		RolePtr *string
+	}
+
+	admin := "admin"
+
+	cases := []struct {
+		name string
+		v    S
+		ok   bool
+	}{
+		{"nil pointer matches nil arm", S{}, true},
+		{"value pointer matches string arm", S{RolePtr: &admin}, true},
+		{"other value does not match", S{RolePtr: strPtr("user")}, false},
+	}
+
+	expr := IN("RolePtr", []any{nil, "admin"})
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Match(tc.v, expr)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.ok {
+				t.Fatalf("Match()=%v, want %v", got, tc.ok)
+			}
+		})
+	}
+}
+
 func TestMatch_SliceOpsWithNilField(t *testing.T) {
 	// nil slice field should behave like empty
 	u := User{
@@ -922,6 +954,29 @@ func TestMatcher_DiffFields_TypeMismatchErrors(t *testing.T) {
 	}
 }
 
+func TestMatcher_DiffFields_PointerNaNSemantics(t *testing.T) {
+	type S struct {
+		Rank *float64
+	}
+
+	m, err := MatcherFor[S]()
+	if err != nil {
+		t.Fatalf("MatcherFor error: %v", err)
+	}
+
+	n := math.NaN()
+	p := &n
+
+	got, err := m.DiffFields(&S{Rank: p}, &S{Rank: p})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(got) != 1 || got[0] != "Rank" {
+		t.Fatalf("expected Rank to differ for same pointer-to-NaN, got %v", got)
+	}
+}
+
 /**/
 
 var (
@@ -1251,6 +1306,88 @@ func BenchmarkMatch_MixedLoop1000(b *testing.B) {
 			}
 		}
 		benchSinkInt = cnt
+	}
+}
+
+func BenchmarkMatch_HasAnyStrings(b *testing.B) {
+	type S struct {
+		Tags []string
+	}
+
+	v := &S{
+		Tags: []string{"admin", "editor", "A", "B"},
+	}
+
+	m, err := MatcherFor[S]()
+	if err != nil {
+		b.Fatalf("MatcherFor error: %v", err)
+	}
+	fn, err := m.Compile(HASANY("Tags", []string{"Z", "B", "editor"}))
+	if err != nil {
+		b.Fatalf("compile error: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		ok, e := fn(v)
+		benchSinkBool = ok
+		benchSinkErr = e
+	}
+}
+
+func BenchmarkMatch_HasStrings(b *testing.B) {
+	type S struct {
+		Tags []string
+	}
+
+	v := &S{
+		Tags: []string{"admin", "editor", "A", "B"},
+	}
+
+	m, err := MatcherFor[S]()
+	if err != nil {
+		b.Fatalf("MatcherFor error: %v", err)
+	}
+	fn, err := m.Compile(HAS("Tags", []string{"admin", "editor"}))
+	if err != nil {
+		b.Fatalf("compile error: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		ok, e := fn(v)
+		benchSinkBool = ok
+		benchSinkErr = e
+	}
+}
+
+func BenchmarkMatch_INInts(b *testing.B) {
+	type S struct {
+		ID int
+	}
+
+	v := &S{ID: 42}
+
+	m, err := MatcherFor[S]()
+	if err != nil {
+		b.Fatalf("MatcherFor error: %v", err)
+	}
+	fn, err := m.Compile(IN("ID", []int{7, 42, 100, 200}))
+	if err != nil {
+		b.Fatalf("compile error: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		ok, e := fn(v)
+		benchSinkBool = ok
+		benchSinkErr = e
 	}
 }
 

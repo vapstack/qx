@@ -16,12 +16,15 @@ type Matcher struct {
 	df      []diffField
 }
 
+type diffUnsafeEqFunc func(p1, p2 unsafe.Pointer) bool
+
 type diffField struct {
 	name     string
 	index    []int
 	sf       reflect.StructField
 	dbName   string
 	jsonName string
+	fastEq   diffUnsafeEqFunc
 }
 
 // MatcherFor creates a Matcher for the struct type T.
@@ -198,6 +201,11 @@ func getDiffFields(rt reflect.Type) []diffField {
 	}
 	var out []diffField
 	collectDiffFields(rt, nil, &out)
+	for i := range out {
+		if off, leaf, ok := calcFastOffset(rt, out[i].index); ok && leaf == out[i].sf.Type {
+			out[i].fastEq = buildDiffFastEq(off, leaf)
+		}
+	}
 	diffFieldsCache.Store(rt, out)
 	return out
 }
@@ -323,9 +331,25 @@ func (m *Matcher) DiffFieldsTag(tag string, values ...any) ([]string, error) {
 			return nil, err
 		}
 
+		var pLeft, pRight unsafe.Pointer
+		if rLeft.CanAddr() {
+			pLeft = unsafe.Pointer(rLeft.UnsafeAddr())
+		}
+		if rRight.CanAddr() {
+			pRight = unsafe.Pointer(rRight.UnsafeAddr())
+		}
+
 		out := make([]string, 0, len(m.df))
 
 		for _, f := range m.df {
+			if pLeft != nil && pRight != nil && f.fastEq != nil {
+				if f.fastEq(pLeft, pRight) {
+					continue
+				}
+				out = append(out, f.nameFor(tag))
+				continue
+			}
+
 			vLeft, ok := getSafeField(rLeft, f.index)
 			if !ok {
 				vLeft = reflect.Value{}
@@ -339,26 +363,7 @@ func (m *Matcher) DiffFieldsTag(tag string, values ...any) ([]string, error) {
 				continue
 			}
 
-			name := f.name
-			if tag != "" {
-				switch tag {
-				case "json":
-					if f.jsonName != "" {
-						name = f.jsonName
-					}
-				case "db":
-					if f.dbName != "" {
-						name = f.dbName
-					}
-				default:
-					tv := firstTagValue(f.sf.Tag.Get(tag))
-					if tv != "" && tv != "-" {
-						name = tv
-					}
-				}
-			}
-
-			out = append(out, name)
+			out = append(out, f.nameFor(tag))
 		}
 
 		return out, nil
@@ -399,29 +404,33 @@ func (m *Matcher) DiffFieldsTag(tag string, values ...any) ([]string, error) {
 			continue
 		}
 
-		name := f.name
-		if tag != "" {
-			switch tag {
-			case "json":
-				if f.jsonName != "" {
-					name = f.jsonName
-				}
-			case "db":
-				if f.dbName != "" {
-					name = f.dbName
-				}
-			default:
-				tv := firstTagValue(f.sf.Tag.Get(tag))
-				if tv != "" && tv != "-" {
-					name = tv
-				}
-			}
-		}
-
-		out = append(out, name)
+		out = append(out, f.nameFor(tag))
 	}
 
 	return out, nil
+}
+
+func (f diffField) nameFor(tag string) string {
+	if tag == "" {
+		return f.name
+	}
+
+	switch tag {
+	case "json":
+		if f.jsonName != "" {
+			return f.jsonName
+		}
+	case "db":
+		if f.dbName != "" {
+			return f.dbName
+		}
+	default:
+		if tv := firstTagValue(f.sf.Tag.Get(tag)); tv != "" && tv != "-" {
+			return tv
+		}
+	}
+
+	return f.name
 }
 
 // Match evaluates the expression expr against v using this Matcher.
@@ -510,42 +519,121 @@ func (m *Matcher) compileRecursive(expr Expr) (matchFunc, error) {
 	var err error
 
 	if expr.Op == OpAND || expr.Op == OpOR {
-
-		checks := make([]matchFunc, 0, len(expr.Operands))
-		for _, sub := range expr.Operands {
-			c, e := m.compileRecursive(sub)
-			if e != nil {
-				return nil, e
+		switch len(expr.Operands) {
+		case 0:
+			if expr.Op == OpAND {
+				checker = func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return true, nil }
+			} else {
+				checker = func(_ unsafe.Pointer, _ reflect.Value) (bool, error) { return false, nil }
 			}
-			checks = append(checks, c)
-		}
-
-		if expr.Op == OpAND {
-			checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
-				for _, check := range checks {
-					ok, e := check(ptr, root)
-					if e != nil {
-						return false, e
-					}
-					if !ok {
-						return false, nil
-					}
-				}
-				return true, nil
+		case 1:
+			checker, err = m.compileRecursive(expr.Operands[0])
+			if err != nil {
+				return nil, err
 			}
-		} else {
-			// OpOR
-			checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
-				for _, check := range checks {
-					ok, e := check(ptr, root)
-					if e != nil {
-						return false, e
+		case 2:
+			left, err := m.compileRecursive(expr.Operands[0])
+			if err != nil {
+				return nil, err
+			}
+			right, err := m.compileRecursive(expr.Operands[1])
+			if err != nil {
+				return nil, err
+			}
+
+			if expr.Op == OpAND {
+				checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+					ok, err := left(ptr, root)
+					if err != nil || !ok {
+						return ok, err
 					}
-					if ok {
-						return true, nil
-					}
+					return right(ptr, root)
 				}
-				return false, nil
+			} else {
+				checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+					ok, err := left(ptr, root)
+					if err != nil || ok {
+						return ok, err
+					}
+					return right(ptr, root)
+				}
+			}
+		case 3:
+			left, err := m.compileRecursive(expr.Operands[0])
+			if err != nil {
+				return nil, err
+			}
+			mid, err := m.compileRecursive(expr.Operands[1])
+			if err != nil {
+				return nil, err
+			}
+			right, err := m.compileRecursive(expr.Operands[2])
+			if err != nil {
+				return nil, err
+			}
+
+			if expr.Op == OpAND {
+				checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+					ok, err := left(ptr, root)
+					if err != nil || !ok {
+						return ok, err
+					}
+					ok, err = mid(ptr, root)
+					if err != nil || !ok {
+						return ok, err
+					}
+					return right(ptr, root)
+				}
+			} else {
+				checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+					ok, err := left(ptr, root)
+					if err != nil || ok {
+						return ok, err
+					}
+					ok, err = mid(ptr, root)
+					if err != nil || ok {
+						return ok, err
+					}
+					return right(ptr, root)
+				}
+			}
+		default:
+			checks := make([]matchFunc, 0, len(expr.Operands))
+			for _, sub := range expr.Operands {
+				c, e := m.compileRecursive(sub)
+				if e != nil {
+					return nil, e
+				}
+				checks = append(checks, c)
+			}
+
+			if expr.Op == OpAND {
+				checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+					for _, check := range checks {
+						ok, e := check(ptr, root)
+						if e != nil {
+							return false, e
+						}
+						if !ok {
+							return false, nil
+						}
+					}
+					return true, nil
+				}
+			} else {
+				// OpOR
+				checker = func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+					for _, check := range checks {
+						ok, e := check(ptr, root)
+						if e != nil {
+							return false, e
+						}
+						if ok {
+							return true, nil
+						}
+					}
+					return false, nil
+				}
 			}
 		}
 	} else {
@@ -1009,6 +1097,93 @@ func makeFastFloat[T ~float32 | ~float64](op Op, off uintptr, qVal float64, isPt
 	}
 }
 
+func buildDiffFastEq(off uintptr, t reflect.Type) diffUnsafeEqFunc {
+	switch t.Kind() {
+	case reflect.Bool:
+		return makeDiffFastScalar[bool](off)
+	case reflect.Int:
+		return makeDiffFastScalar[int](off)
+	case reflect.Int8:
+		return makeDiffFastScalar[int8](off)
+	case reflect.Int16:
+		return makeDiffFastScalar[int16](off)
+	case reflect.Int32:
+		return makeDiffFastScalar[int32](off)
+	case reflect.Int64:
+		return makeDiffFastScalar[int64](off)
+	case reflect.Uint:
+		return makeDiffFastScalar[uint](off)
+	case reflect.Uint8:
+		return makeDiffFastScalar[uint8](off)
+	case reflect.Uint16:
+		return makeDiffFastScalar[uint16](off)
+	case reflect.Uint32:
+		return makeDiffFastScalar[uint32](off)
+	case reflect.Uint64:
+		return makeDiffFastScalar[uint64](off)
+	case reflect.Uintptr:
+		return makeDiffFastScalar[uintptr](off)
+	case reflect.Float32:
+		return makeDiffFastScalar[float32](off)
+	case reflect.Float64:
+		return makeDiffFastScalar[float64](off)
+	case reflect.String:
+		return makeDiffFastScalar[string](off)
+	case reflect.Pointer:
+		switch t.Elem().Kind() {
+		case reflect.Bool:
+			return makeDiffFastPtrScalar[bool](off)
+		case reflect.Int:
+			return makeDiffFastPtrScalar[int](off)
+		case reflect.Int8:
+			return makeDiffFastPtrScalar[int8](off)
+		case reflect.Int16:
+			return makeDiffFastPtrScalar[int16](off)
+		case reflect.Int32:
+			return makeDiffFastPtrScalar[int32](off)
+		case reflect.Int64:
+			return makeDiffFastPtrScalar[int64](off)
+		case reflect.Uint:
+			return makeDiffFastPtrScalar[uint](off)
+		case reflect.Uint8:
+			return makeDiffFastPtrScalar[uint8](off)
+		case reflect.Uint16:
+			return makeDiffFastPtrScalar[uint16](off)
+		case reflect.Uint32:
+			return makeDiffFastPtrScalar[uint32](off)
+		case reflect.Uint64:
+			return makeDiffFastPtrScalar[uint64](off)
+		case reflect.Uintptr:
+			return makeDiffFastPtrScalar[uintptr](off)
+		case reflect.Float32:
+			return makeDiffFastPtrScalar[float32](off)
+		case reflect.Float64:
+			return makeDiffFastPtrScalar[float64](off)
+		case reflect.String:
+			return makeDiffFastPtrScalar[string](off)
+		}
+	}
+
+	return nil
+}
+
+func makeDiffFastScalar[T comparable](off uintptr) diffUnsafeEqFunc {
+	return func(p1, p2 unsafe.Pointer) bool {
+		return *(*T)(unsafe.Add(p1, off)) == *(*T)(unsafe.Add(p2, off))
+	}
+}
+
+func makeDiffFastPtrScalar[T comparable](off uintptr) diffUnsafeEqFunc {
+	return func(p1, p2 unsafe.Pointer) bool {
+		left := *(**T)(unsafe.Add(p1, off))
+		right := *(**T)(unsafe.Add(p2, off))
+		if left == nil || right == nil {
+			return left == right
+		}
+		return *left == *right
+	}
+}
+
 func compileSliceOp(op Op, index []int, rootType, fieldType reflect.Type, queryVal any) (matchFunc, error) {
 
 	isSliceField := false
@@ -1076,6 +1251,10 @@ func compileSliceOp(op Op, index []int, rootType, fieldType reflect.Type, queryV
 
 	if op == OpIN {
 		return compileStrictIN(index, rootType, fieldType, qVal)
+	}
+
+	if check, ok := compileStringSliceOp(op, index, rootType, fieldType, qVal); ok {
+		return check, nil
 	}
 
 	evalSliceOp := func(fieldSlice reflect.Value) bool {
@@ -1169,6 +1348,69 @@ func compileSliceOp(op Op, index []int, rootType, fieldType reflect.Type, queryV
 	}, nil
 }
 
+func compileStringSliceOp(op Op, index []int, rootType, fieldType reflect.Type, qVal reflect.Value) (matchFunc, bool) {
+	isPtrField := false
+
+	switch {
+	case fieldType == reflect.TypeOf([]string(nil)):
+	case fieldType.Kind() == reflect.Pointer && fieldType.Elem() == reflect.TypeOf([]string(nil)):
+		isPtrField = true
+	default:
+		return nil, false
+	}
+
+	qs := make([]string, 0, qVal.Len())
+	for i := 0; i < qVal.Len(); i++ {
+		raw := qVal.Index(i).Interface()
+		if isNilLikeQueryValue(raw) {
+			return nil, false
+		}
+
+		qv, err := prepareValue(reflect.TypeOf(""), raw)
+		if err != nil {
+			return nil, false
+		}
+		qs = append(qs, qv.String())
+	}
+
+	qs = dedupStrings(qs)
+	if len(qs) == 0 {
+		return nil, false
+	}
+
+	slow := func(root reflect.Value) (bool, error) {
+		fieldSlice, ok := getSafeField(root, index)
+		if !ok {
+			return false, nil
+		}
+		if isPtrField {
+			if fieldSlice.Kind() != reflect.Pointer || fieldSlice.IsNil() {
+				return false, nil
+			}
+			fieldSlice = fieldSlice.Elem()
+		}
+		if fieldSlice.Kind() != reflect.Slice {
+			return false, nil
+		}
+		return matchStringSliceReflect(op, fieldSlice, qs), nil
+	}
+
+	off, leafType, ok := calcFastOffset(rootType, index)
+	if !ok || leafType != fieldType {
+		return func(_ unsafe.Pointer, root reflect.Value) (bool, error) {
+			return slow(root)
+		}, true
+	}
+
+	fast := makeFastStringSliceOp(op, off, qs, isPtrField)
+	return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+		if ptr != nil {
+			return fast(ptr)
+		}
+		return slow(root)
+	}, true
+}
+
 func compileStrictIN(index []int, rootType, fieldType reflect.Type, qVal reflect.Value) (matchFunc, error) {
 	if qVal.Len() == 1 {
 		check, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(0).Interface())
@@ -1176,6 +1418,88 @@ func compileStrictIN(index []int, rootType, fieldType reflect.Type, qVal reflect
 			return nil, fmt.Errorf("IN value at index 0: %w", err)
 		}
 		return check, nil
+	}
+
+	if check, ok, err := compileStringIN(index, rootType, fieldType, qVal); ok || err != nil {
+		return check, err
+	}
+
+	switch qVal.Len() {
+
+	case 2:
+		left, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(0).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 0: %w", err)
+		}
+		right, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(1).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 1: %w", err)
+		}
+		return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+			ok, e := left(ptr, root)
+			if e != nil || ok {
+				return ok, e
+			}
+			return right(ptr, root)
+		}, nil
+
+	case 3:
+		left, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(0).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 0: %w", err)
+		}
+		mid, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(1).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 1: %w", err)
+		}
+		right, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(2).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 2: %w", err)
+		}
+		return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+			ok, e := left(ptr, root)
+			if e != nil || ok {
+				return ok, e
+			}
+			ok, e = mid(ptr, root)
+			if e != nil || ok {
+				return ok, e
+			}
+			return right(ptr, root)
+		}, nil
+
+	case 4:
+		a, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(0).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 0: %w", err)
+		}
+		b, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(1).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 1: %w", err)
+		}
+		c, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(2).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 2: %w", err)
+		}
+		d, err := compileScalarHybrid(OpEQ, index, rootType, fieldType, qVal.Index(3).Interface())
+		if err != nil {
+			return nil, fmt.Errorf("IN value at index 3: %w", err)
+		}
+		return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+			ok, e := a(ptr, root)
+			if e != nil || ok {
+				return ok, e
+			}
+			ok, e = b(ptr, root)
+			if e != nil || ok {
+				return ok, e
+			}
+			ok, e = c(ptr, root)
+			if e != nil || ok {
+				return ok, e
+			}
+			return d(ptr, root)
+		}, nil
 	}
 
 	checks := make([]matchFunc, 0, qVal.Len())
@@ -1199,6 +1523,546 @@ func compileStrictIN(index []int, rootType, fieldType reflect.Type, qVal reflect
 		}
 		return false, nil
 	}, nil
+}
+
+func compileStringIN(index []int, rootType, fieldType reflect.Type, qVal reflect.Value) (matchFunc, bool, error) {
+	isPtrField := fieldType.Kind() == reflect.Pointer
+
+	switch {
+	case fieldType.Kind() == reflect.String:
+	case isPtrField && fieldType.Elem().Kind() == reflect.String:
+	default:
+		return nil, false, nil
+	}
+
+	qs := make([]string, qVal.Len())
+	for i := 0; i < qVal.Len(); i++ {
+		raw := qVal.Index(i).Interface()
+		if isNilLikeQueryValue(raw) {
+			return nil, false, nil
+		}
+
+		qv, err := prepareValue(reflect.TypeOf(""), raw)
+		if err != nil {
+			return nil, true, fmt.Errorf("IN value at index %d: %w", i, err)
+		}
+		qs[i] = qv.String()
+	}
+
+	slow := func(root reflect.Value) (bool, error) {
+		fv, ok := getSafeField(root, index)
+		if !ok {
+			return false, nil
+		}
+		for fv.Kind() == reflect.Interface {
+			if fv.IsNil() {
+				return false, nil
+			}
+			fv = fv.Elem()
+		}
+		if isPtrField {
+			if fv.Kind() != reflect.Pointer || fv.IsNil() {
+				return false, nil
+			}
+			fv = fv.Elem()
+		}
+		if fv.Kind() != reflect.String {
+			return false, nil
+		}
+		return containsString(fv.String(), qs), nil
+	}
+
+	off, leafType, ok := calcFastOffset(rootType, index)
+	if !ok || leafType != fieldType {
+		return func(_ unsafe.Pointer, root reflect.Value) (bool, error) {
+			return slow(root)
+		}, true, nil
+	}
+
+	fast := makeFastStringIN(off, qs, isPtrField)
+	return func(ptr unsafe.Pointer, root reflect.Value) (bool, error) {
+		if ptr != nil {
+			return fast(ptr)
+		}
+		return slow(root)
+	}, true, nil
+}
+
+func makeFastStringIN(off uintptr, qs []string, isPtr bool) func(unsafe.Pointer) (bool, error) {
+	switch len(qs) {
+
+	case 0:
+		return func(_ unsafe.Pointer) (bool, error) { return false, nil }
+
+	case 1:
+		q0 := qs[0]
+		if !isPtr {
+			return func(ptr unsafe.Pointer) (bool, error) {
+				return *(*string)(unsafe.Add(ptr, off)) == q0, nil
+			}
+		}
+		return func(ptr unsafe.Pointer) (bool, error) {
+			p := *(**string)(unsafe.Add(ptr, off))
+			if p == nil {
+				return false, nil
+			}
+			return *p == q0, nil
+		}
+
+	case 2:
+		q0, q1 := qs[0], qs[1]
+		if !isPtr {
+			return func(ptr unsafe.Pointer) (bool, error) {
+				s := *(*string)(unsafe.Add(ptr, off))
+				return s == q0 || s == q1, nil
+			}
+		}
+		return func(ptr unsafe.Pointer) (bool, error) {
+			p := *(**string)(unsafe.Add(ptr, off))
+			if p == nil {
+				return false, nil
+			}
+			s := *p
+			return s == q0 || s == q1, nil
+		}
+
+	case 3:
+		q0, q1, q2 := qs[0], qs[1], qs[2]
+		if !isPtr {
+			return func(ptr unsafe.Pointer) (bool, error) {
+				s := *(*string)(unsafe.Add(ptr, off))
+				return s == q0 || s == q1 || s == q2, nil
+			}
+		}
+		return func(ptr unsafe.Pointer) (bool, error) {
+			p := *(**string)(unsafe.Add(ptr, off))
+			if p == nil {
+				return false, nil
+			}
+			s := *p
+			return s == q0 || s == q1 || s == q2, nil
+		}
+
+	case 4:
+		q0, q1, q2, q3 := qs[0], qs[1], qs[2], qs[3]
+		if !isPtr {
+			return func(ptr unsafe.Pointer) (bool, error) {
+				s := *(*string)(unsafe.Add(ptr, off))
+				return s == q0 || s == q1 || s == q2 || s == q3, nil
+			}
+		}
+		return func(ptr unsafe.Pointer) (bool, error) {
+			p := *(**string)(unsafe.Add(ptr, off))
+			if p == nil {
+				return false, nil
+			}
+			s := *p
+			return s == q0 || s == q1 || s == q2 || s == q3, nil
+		}
+
+	default:
+		if !isPtr {
+			return func(ptr unsafe.Pointer) (bool, error) {
+				s := *(*string)(unsafe.Add(ptr, off))
+				for i := range qs {
+					if s == qs[i] {
+						return true, nil
+					}
+				}
+				return false, nil
+			}
+		}
+		return func(ptr unsafe.Pointer) (bool, error) {
+			p := *(**string)(unsafe.Add(ptr, off))
+			if p == nil {
+				return false, nil
+			}
+			s := *p
+			for i := range qs {
+				if s == qs[i] {
+					return true, nil
+				}
+			}
+			return false, nil
+		}
+	}
+}
+
+func containsString(s string, qs []string) bool {
+	switch len(qs) {
+	case 0:
+		return false
+	case 1:
+		return s == qs[0]
+	case 2:
+		return s == qs[0] || s == qs[1]
+	case 3:
+		return s == qs[0] || s == qs[1] || s == qs[2]
+	case 4:
+		return s == qs[0] || s == qs[1] || s == qs[2] || s == qs[3]
+	default:
+		for i := range qs {
+			if s == qs[i] {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func isNilLikeQueryValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
+func makeFastStringSliceOp(op Op, off uintptr, qs []string, isPtr bool) func(unsafe.Pointer) (bool, error) {
+	if !isPtr {
+		return func(ptr unsafe.Pointer) (bool, error) {
+			return matchStringSlice(op, *(*[]string)(unsafe.Add(ptr, off)), qs), nil
+		}
+	}
+	return func(ptr unsafe.Pointer) (bool, error) {
+		p := *(**[]string)(unsafe.Add(ptr, off))
+		if p == nil {
+			return false, nil
+		}
+		return matchStringSlice(op, *p, qs), nil
+	}
+}
+
+func matchStringSliceReflect(op Op, fieldSlice reflect.Value, qs []string) bool {
+	if fieldSlice.IsNil() || fieldSlice.Len() == 0 {
+		return false
+	}
+
+	switch op {
+
+	case OpHASANY:
+		switch len(qs) {
+
+		case 1:
+			q0 := qs[0]
+			for i := 0; i < fieldSlice.Len(); i++ {
+				if fieldSlice.Index(i).String() == q0 {
+					return true
+				}
+			}
+			return false
+
+		case 2:
+			q0, q1 := qs[0], qs[1]
+			for i := 0; i < fieldSlice.Len(); i++ {
+				s := fieldSlice.Index(i).String()
+				if s == q0 || s == q1 {
+					return true
+				}
+			}
+			return false
+
+		case 3:
+			q0, q1, q2 := qs[0], qs[1], qs[2]
+			for i := 0; i < fieldSlice.Len(); i++ {
+				s := fieldSlice.Index(i).String()
+				if s == q0 || s == q1 || s == q2 {
+					return true
+				}
+			}
+			return false
+
+		case 4:
+			q0, q1, q2, q3 := qs[0], qs[1], qs[2], qs[3]
+			for i := 0; i < fieldSlice.Len(); i++ {
+				s := fieldSlice.Index(i).String()
+				if s == q0 || s == q1 || s == q2 || s == q3 {
+					return true
+				}
+			}
+			return false
+
+		default:
+			for i := 0; i < fieldSlice.Len(); i++ {
+				s := fieldSlice.Index(i).String()
+				for j := range qs {
+					if s == qs[j] {
+						return true
+					}
+				}
+			}
+			return false
+		}
+
+	case OpHAS:
+		return matchStringSliceReflectHAS(fieldSlice, qs)
+
+	default:
+		return false
+	}
+}
+
+func matchStringSliceReflectHAS(fieldSlice reflect.Value, qs []string) bool {
+	switch len(qs) {
+
+	case 1:
+		q0 := qs[0]
+		for i := 0; i < fieldSlice.Len(); i++ {
+			if fieldSlice.Index(i).String() == q0 {
+				return true
+			}
+		}
+		return false
+
+	case 2:
+		q0, q1 := qs[0], qs[1]
+		found0, found1 := false, false
+		for i := 0; i < fieldSlice.Len(); i++ {
+			s := fieldSlice.Index(i).String()
+			if s == q0 {
+				found0 = true
+			}
+			if s == q1 {
+				found1 = true
+			}
+			if found0 && found1 {
+				return true
+			}
+		}
+		return false
+
+	case 3:
+		q0, q1, q2 := qs[0], qs[1], qs[2]
+		found0, found1, found2 := false, false, false
+		for i := 0; i < fieldSlice.Len(); i++ {
+			s := fieldSlice.Index(i).String()
+			if s == q0 {
+				found0 = true
+			}
+			if s == q1 {
+				found1 = true
+			}
+			if s == q2 {
+				found2 = true
+			}
+			if found0 && found1 && found2 {
+				return true
+			}
+		}
+		return false
+
+	case 4:
+		q0, q1, q2, q3 := qs[0], qs[1], qs[2], qs[3]
+		found0, found1, found2, found3 := false, false, false, false
+		for i := 0; i < fieldSlice.Len(); i++ {
+			s := fieldSlice.Index(i).String()
+			if s == q0 {
+				found0 = true
+			}
+			if s == q1 {
+				found1 = true
+			}
+			if s == q2 {
+				found2 = true
+			}
+			if s == q3 {
+				found3 = true
+			}
+			if found0 && found1 && found2 && found3 {
+				return true
+			}
+		}
+		return false
+
+	default:
+		for i := range qs {
+			found := false
+			q := qs[i]
+			for j := 0; j < fieldSlice.Len(); j++ {
+				if fieldSlice.Index(j).String() == q {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func matchStringSlice(op Op, fieldSlice []string, qs []string) bool {
+	if len(fieldSlice) == 0 {
+		return false
+	}
+
+	switch op {
+
+	case OpHASANY:
+		switch len(qs) {
+
+		case 1:
+			q0 := qs[0]
+			for _, s := range fieldSlice {
+				if s == q0 {
+					return true
+				}
+			}
+			return false
+
+		case 2:
+			q0, q1 := qs[0], qs[1]
+			for _, s := range fieldSlice {
+				if s == q0 || s == q1 {
+					return true
+				}
+			}
+			return false
+
+		case 3:
+			q0, q1, q2 := qs[0], qs[1], qs[2]
+			for _, s := range fieldSlice {
+				if s == q0 || s == q1 || s == q2 {
+					return true
+				}
+			}
+			return false
+
+		case 4:
+			q0, q1, q2, q3 := qs[0], qs[1], qs[2], qs[3]
+			for _, s := range fieldSlice {
+				if s == q0 || s == q1 || s == q2 || s == q3 {
+					return true
+				}
+			}
+			return false
+
+		default:
+			for _, s := range fieldSlice {
+				for i := range qs {
+					if s == qs[i] {
+						return true
+					}
+				}
+			}
+			return false
+		}
+
+	case OpHAS:
+		switch len(qs) {
+
+		case 1:
+			q0 := qs[0]
+			for _, s := range fieldSlice {
+				if s == q0 {
+					return true
+				}
+			}
+			return false
+
+		case 2:
+			q0, q1 := qs[0], qs[1]
+			found0, found1 := false, false
+			for _, s := range fieldSlice {
+				if s == q0 {
+					found0 = true
+				}
+				if s == q1 {
+					found1 = true
+				}
+				if found0 && found1 {
+					return true
+				}
+			}
+			return false
+
+		case 3:
+			q0, q1, q2 := qs[0], qs[1], qs[2]
+			found0, found1, found2 := false, false, false
+			for _, s := range fieldSlice {
+				if s == q0 {
+					found0 = true
+				}
+				if s == q1 {
+					found1 = true
+				}
+				if s == q2 {
+					found2 = true
+				}
+				if found0 && found1 && found2 {
+					return true
+				}
+			}
+			return false
+
+		case 4:
+			q0, q1, q2, q3 := qs[0], qs[1], qs[2], qs[3]
+			found0, found1, found2, found3 := false, false, false, false
+			for _, s := range fieldSlice {
+				if s == q0 {
+					found0 = true
+				}
+				if s == q1 {
+					found1 = true
+				}
+				if s == q2 {
+					found2 = true
+				}
+				if s == q3 {
+					found3 = true
+				}
+				if found0 && found1 && found2 && found3 {
+					return true
+				}
+			}
+			return false
+		default:
+			for i := range qs {
+				found := false
+				q := qs[i]
+				for _, s := range fieldSlice {
+					if s == q {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+			}
+			return true
+		}
+	default:
+		return false
+	}
+}
+
+func dedupStrings(v []string) []string {
+	if len(v) < 2 {
+		return v
+	}
+
+	out := v[:0]
+	for i := range v {
+		s := v[i]
+		dup := false
+		for j := range out {
+			if out[j] == s {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func compileSliceFast(index []int, rootType, fieldType reflect.Type, evalFn func(fieldSlice reflect.Value) bool) (func(unsafe.Pointer) (bool, error), bool) {
