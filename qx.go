@@ -8,7 +8,22 @@ import (
 
 // Query creates a new QX and sets the provided expressions as part of the root AND group.
 // With zero expressions it returns an empty query. With one expression it becomes the root.
+//
+// Query and Where functions are completely equivalent.
 func Query(expressions ...Expr) *QX {
+	if len(expressions) == 0 {
+		return new(QX)
+	} else if len(expressions) == 1 {
+		return &QX{Expr: expressions[0]}
+	}
+	return &QX{Expr: AND(expressions...)}
+}
+
+// Where creates a new QX and sets the provided expressions as part of the root AND group.
+// With zero expressions it returns an empty query. With one expression it becomes the root.
+//
+// Where and Query functions are completely equivalent.
+func Where(expressions ...Expr) *QX {
 	if len(expressions) == 0 {
 		return new(QX)
 	} else if len(expressions) == 1 {
@@ -141,8 +156,8 @@ const (
 	OrderByArrayCount
 )
 
-// AND combines the current expression with exprs using logical AND.
-func (qx *QX) AND(exprs ...Expr) *QX {
+// Where combines the current expression with exprs using logical AND.
+func (qx *QX) Where(exprs ...Expr) *QX {
 	if qx.Expr.Op == OpNOOP {
 		qx.Expr = AND(exprs...)
 	} else if qx.Expr.Op == OpAND {
@@ -157,6 +172,7 @@ func (qx *QX) AND(exprs ...Expr) *QX {
 }
 
 // OR combines the current expression with exprs using logical OR.
+/* -- currently removed
 func (qx *QX) OR(exprs ...Expr) *QX {
 	if qx.Expr.Op == OpNOOP {
 		qx.Expr = OR(exprs...)
@@ -170,6 +186,7 @@ func (qx *QX) OR(exprs ...Expr) *QX {
 	}
 	return qx
 }
+*/
 
 // CacheKey sets an optional cache key associated with the query.
 func (qx *QX) CacheKey(key string) *QX {

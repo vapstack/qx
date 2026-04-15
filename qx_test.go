@@ -43,10 +43,16 @@ func TestQueryBuilder(t *testing.T) {
 	if q.Expr.Op != OpAND || len(q.Expr.Operands) != 2 {
 		t.Fatalf("Query(a,b) should create AND expr")
 	}
+
+	q = Where(EQ("A", 1), EQ("B", 2))
+	if q.Expr.Op != OpAND || len(q.Expr.Operands) != 2 {
+		t.Fatalf("Where(a,b) should alias Query and create AND expr")
+	}
 }
 
 func TestQXFluentAPI(t *testing.T) {
 	q := Query(EQ("A", 1)).
+		Where(EQ("B", 2)).
 		CacheKey("k").
 		By("A", ASC).
 		ByArrayCount("B", DESC).
@@ -58,6 +64,9 @@ func TestQXFluentAPI(t *testing.T) {
 	}
 	if q.Offset != 10 || q.Limit != 5 {
 		t.Fatalf("Skip/Max broken: offset=%d limit=%d", q.Offset, q.Limit)
+	}
+	if q.Expr.Op != OpAND || len(q.Expr.Operands) != 2 {
+		t.Fatalf("Where should combine expressions using AND, got %+v", q.Expr)
 	}
 	if len(q.Order) != 2 {
 		t.Fatalf("Order not accumulated")

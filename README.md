@@ -111,6 +111,7 @@ q := qx.Query(
 By("created_at", qx.DESC).
 Page(1, 50)
 ```
+`Query` and `Where` are equivalent and can be used interchangeably.
 
 See the [GoDoc](https://godoc.org/github.com/vapstack/qx) for a complete API reference.
 
@@ -191,13 +192,12 @@ This makes the matcher suitable for “document-style” filtering.
 
 ### Performance characteristics
 
-The matcher is designed with performance in mind:
 - No allocations on the fast path for scalar comparisons
 - Optional unsafe field access when values are passed as *T
 - Reflection metadata cached per type
 - Expression compilation amortizes cost over repeated runs
 
-Typical performance characteristics:
+Rough estimates:
 - Simple scalar predicates: tens of nanoseconds
 - Mixed predicates: tens to hundreds of nanoseconds
 - Complex structures (slices, nested structs): higher cost, still allocation-aware
