@@ -1,203 +1,336 @@
 # qx
 
-[![GoDoc](https://godoc.org/github.com/vapstack/qx?status.svg)](https://godoc.org/github.com/vapstack/qx)
-[![License](https://img.shields.io/badge/license-Apache2-blue.svg)](https://raw.githubusercontent.com/vapstack/qx/master/LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/vapstack/qx.svg)](https://pkg.go.dev/github.com/vapstack/qx)
+[![License](https://img.shields.io/badge/license-Apache%202-blue.svg)](LICENSE)
 
-`qx` is a small, focused package for describing query expressions in a structured,
-type-agnostic form.  
-Its primary purpose is to act as a minimal **query / filter AST** (expressions, ordering, pagination)
-that can be consumed by other packages (databases, indexes, storage engines).
-It does not support projections, joins, or aggregation functions as its main purpose is filtering. 
-User-defined functions may be implemented in the future, but currently there are no plans for that.
+Backend-agnostic query builder, filter AST and query IR for Go.
 
-`qx` does not perform backend-specific normalization (NNF, De Morgan, CNF/DNF rewrites)
-because many engines implement their own optimization strategies based on their internal layout.
-It does provide `Normalize` for cheap, semantics-preserving structural rewrites such as
-flattening nested `AND`/`OR` and collapsing single-item logical groups.
+It represents query intent as data instead of backend-specific syntax.
+`QX` can carry filters, scalar expressions, grouping, aggregates, ordering,
+pagination, projection, and caller-defined metadata.
 
-As a secondary feature, it also provides a **high-performance in-memory matcher**:
-a fast evaluator that applies expressions to Go structs using reflection and unsafe optimizations.  
-This is intended for cases where filtering happens in memory without an index.
+Another layer can validate, normalize, serialize and translate it into SQL,
+a document-store query, a search request, or some other backend-specific form.
 
-You can use the expression layer without ever touching the matcher.
+It does not execute queries.\
+It also does not model joins or subqueries.
 
-## Query Expression
+## Use cases
 
-The expression language is intentionally simple and explicit.\
-It represents filters as a tree of expressions combined with logical operators.
+- It is not known which backend will execute the query.
+- Application code should not depend on a PostgreSQL, ClickHouse, Mongo,
+  Elasticsearch or other specific builder or syntax.
+- The same filtering, ordering, and pagination contract must work across
+  multiple backends.
+- Queries arrive from HTTP, RPC, config, or scheduled jobs and need to be
+  represented in one common format.
+- Queries should cross package or service boundaries before translation happens.
+- Validation and normalization should happen before a backend-specific layer.
 
-### Expressions
+QX is usually not the right abstraction when:
 
-An `Expr` represents either:
-- a comparison on a field (`EQ`, `GT`, `IN`, `HAS`, ...)
-- a logical combination of other expressions (`AND`, `OR`)
+- the query model depends on joins or subqueries
+- the public API is intentionally tied to one concrete backend and its native
+  query language
 
-```go
-type Expr struct {
-    Op       Op
-    Not      bool
-    Field    string
-    Value    any
-    Operands []Expr
-}
-```
+## Quick start
 
-### Supported operations
-
-The semantics are intentionally close to what most query engines provide:
-
-- Scalar comparisons:
-    - `EQ`, `NE` (`NOTEQ`) `GT`, `GTE`, `LT`, `LTE`
-- String operations (case-sensitive):
-    - `PREFIX` — field value starts with the provided string
-    - `SUFFIX` — field value ends with the provided string
-    - `CONTAINS` — field value contains the provided substring
-- Set / slice operations:
-    - `IN` — scalar field value is contained in the provided slice
-    - `NOTIN` — scalar field value is **not** contained in the provided slice *
-    - `HAS` — slice field contains **all** provided values
-    - `HASANY` — slice field contains **at least one** provided value
-    - `HASNOT` — slice field does **not** contain **all** provided values *
-    - `HASNONE` — slice field contains **none** of the provided values *
-- Logical operations:
-    - `AND`, `OR`, `NOT`
-- Syntactic sugar:
-    - `NE`, `NOTEQ` - an alias for `NOT(EQ)`
-    - `NOTIN` - an alias for `NOT(IN)`
-    - `HASNOT` - an alias for `NOT(HAS)`
-    - `HASNONE` - an alias for `NOT(HASANY)`
-
-*Syntactic sugar operations exist only as helper functions and do not have separate opcodes.*
-
-Expressions can be constructed using helper functions with the same names:
-```
-qx.EQ("age", 30)
-qx.GT("score", 100)
-qx.IN("status", []string{"active", "pending"})
-
-qx.AND(
-    qx.EQ("country", "US"),
-    qx.GTE("age", 20),
-)
-
-qx.NE("deleted", true)
-```
-
-### Queries
-
-`QX` combines:
-- a root expression
-- optional ordering rules
-- pagination (offset / limit)
-- an optional cache key
+For a plain filtered list, build a `QX` with predicates, sort order, and a window:
 
 ```go
-type QX struct {
-    Key    string
-    Expr   Expr
-    Order  []Order
-    Offset uint64
-    Limit  uint64
-}
+q := qx.
+    Query(
+        qx.EQ("tenant_id", "t-1"),
+        qx.EQ("status", "paid"),
+        qx.GTE("created_at", "2026-04-01"),
+    ).
+    Sort("created_at", qx.DESC).
+    Limit(50)
 ```
 
-This makes it suitable as a transport or intermediate representation between systems.
+This describes "paid orders for tenant `t-1`, newest first, first 50 rows".
+The result is still plain query data. Translation into SQL or another backend
+format happens elsewhere.
+
+## Query model
+
+A `QX` usually flows through these stages:
+
+```text
+filter -> reduction -> order -> window -> projection
+```
+
+- **Filter**: predicate tree evaluated against source fields
+- **Reduction**: optional grouping, metrics, and post-reduction filtering
+- **Order**: sort rules before or after reduction, depending on the query shape
+- **Window**: offset and limit
+- **Projection**: final output shape
+
+Without a reduction stage, the query behaves like a filtered list query. With a
+reduction stage, the query behaves like a grouped or aggregate query.
+
+## Builder and IR
+
+The package has two parts:
+
+- a fluent builder on `*QX`
+- a serializable expression tree built from `QX` and `Expr`
+
+The main starting points are:
+
+- filter-first: `Query`, `Where`
+- reduction-first: `Group`, `GroupBy`, `Metrics`, `Aggregate`
+- projection-first: `Select`, `Fields`, `SelectOut`, `FieldsOut`
+
+Every helper eventually produces an `Expr`. There is only one expression node
+type, with four forms:
+
+- `REF(name)` for source fields
+- `OUT(name)` for reduction outputs
+- `LIT(value)` for literals
+- `OP(name, args...)` for named operations
+
+Helpers such as `EQ`, `SUM`, `LOWER`, `DATETRUNC`, and `AND` all produce
+ordinary `Expr` values. There is no separate DSL or special node type for
+built-in helpers.
+
+Builder conventions:
+
+- `Query` and `Where` are equivalent constructors
+- `Select*` and `Fields*` are equivalent constructors
+- repeated `Where` calls append predicates with `AND`
+- repeated `Having` calls append predicates with `AND`
+- in most helpers, the first `string` argument is shorthand for `REF(name)`
+- in helpers that accept plain values after the first argument, **non-Expr**
+  values become `LIT(value)`
+- aliases are attached with `AS(...)`
+- computed metric and projection items should have stable output names
+
+Examples:
+
+```go
+qx.EQ("status", "paid") // EQ(REF("status"), LIT("paid"))
+
+qx.EQ(qx.LOWER("email"), "ops@example.com")
+qx.DATEDIFF("created_at", qx.NOW(), "day")
+qx.CONCAT(qx.REF("country"), qx.LIT("-"), qx.REF("city"))
+```
+
+## Filters and expressions
+
+Filters are explicit expression trees. Scalar helpers can be composed anywhere
+an `Expr` is accepted.
+
+```go
+q := qx.
+    Query(
+        qx.EQ("tenant_id", "t-1"),
+    ).
+    Where(
+        qx.OR(
+            qx.EQ("status", "paid"),
+            qx.EQ("status", "refunded"),
+        ),
+        qx.GTE("total_amount", 100),
+        qx.NOT(qx.EXISTS("deleted_at")),
+        qx.EQ(
+            qx.NULLIF(qx.TRIM("promo_code"), ""),
+            "spring-2026",
+        ),
+    )
+```
+
+This is still backend-neutral. The query can be built in application code,
+received from transport input, or assembled from other query fragments before it
+is translated.
+
+## Grouping, metrics, and reduction outputs
+
+For grouped or aggregate results, add a reduction stage:
+
+```go
+q := qx.
+    Query(
+        qx.EQ("tenant_id", "t-1"),
+        qx.EQ("status", "paid"),
+        qx.GTE("created_at", "2026-04-01"),
+        qx.LT("created_at", "2026-05-01"),
+    ).
+    Group("country").
+    GroupBy(qx.DATETRUNC("created_at", "day").AS("day")).
+    Metrics(
+        qx.ROWCOUNT().AS("orders"),
+        qx.SUM("total_amount").AS("revenue"),
+        qx.AVG("total_amount").AS("avg_order_value"),
+    ).
+    Having(
+        qx.GTE(qx.OUT("orders"), 20),
+        qx.GTE(qx.OUT("revenue"), 10000),
+    ).
+    SortOut("revenue", qx.DESC).
+    SortOut("day")
+```
+
+Reduction rules worth knowing:
+
+- `Group("country")` is shorthand for grouping by a source field
+- `GroupBy` accepts arbitrary grouping expressions
+- `Metrics` defines aggregate outputs
+- `Having` filters after reduction
+- `OUT("name")` refers to a grouping or metric output by name
+- after reduction, `Having`, ordering, and projection should refer to outputs
+  through `OUT(...)`
+- grouping without metrics still has meaning: it acts like a distinct-style
+  query over the grouping keys
+
+## Projection, ordering, and pagination
+
+Without an explicit projection, the query keeps its natural output shape:
+
+- before reduction: source rows or documents
+- after reduction: grouping keys and metric outputs
+
+Use projection when the caller needs a specific final shape:
+
+```go
+q := qx.
+    Query(
+        qx.EQ("tenant_id", "t-1"),
+        qx.EQ("status", "paid"),
+    ).
+    Fields("id", "customer_email").
+    FieldsExpr(
+        qx.LOWER("customer_email").AS("customer_email_lower"),
+    ).
+    Sort("created_at", qx.DESC).
+    Page(1, 50)
+```
+
+After reduction, projection should use reduction outputs rather than source fields:
+
+```go
+q := qx.
+    Group("country").
+    Metrics(
+        qx.SUM("total_amount").AS("revenue"),
+        qx.ROWCOUNT().AS("orders"),
+    ).
+    FieldsOut("country", "revenue").
+    FieldsExpr(
+        qx.LOWER(qx.OUT("country")).AS("country_lower"),
+        qx.IF(qx.GT(qx.OUT("orders"), 0), qx.OUT("orders"), qx.LIT(0)).AS("orders_nonzero"),
+    ).
+    SortOut("revenue", qx.DESC)
+```
+
+Notes:
+
+- `q.Select` and `q.Fields` append source-field references
+- `q.SelectOut` and `q.FieldsOut` append reduction-output references
+- `q.SelectExpr` and `q.FieldsExpr` append arbitrary expressions
+- `q.Sort` orders by a source field
+- `q.SortOut` orders by a reduction output
+- `q.SortBy` orders by an arbitrary expression
+- `q.Page(pageNum, perPage)` is 1-based
+- `q.Limit` and `q.Offset` are available when the caller already speaks offsets
+
+## Validation, normalization, and cloning
+
+Package includes structural utilities for working with query values:
+
+- `Validate` checks node shape, helper arity, stage placement rules, output
+  names, and duplicate projection or reduction outputs
+- `Validate` returns the first failure as `*ValidationError` with
+  `Code` and `Path`, for example `filter.args[0]`,
+  `reduction.metrics[1].args[0]`, or `order[0].by`
+- `Normalize` rewrites only cheap structural cases: it flattens nested `AND`
+  and `OR`, and collapses single-item logical groups
+- `Normalize` is not a query optimizer and does not reorder predicates or do
+  backend-specific rewrites
+- `Clone` returns a deep structural copy, including mutable literal payloads
+- `UsedFields` returns a de-duplicated list of source fields referenced
+  anywhere in the query; `OUT` references are excluded
+
+Validation catches:
+
+- malformed expression nodes
+- aggregate operations used in `Filter`, `Group`, or pre-reduction order
+- `OUT` used before reduction
+- unknown output names after reduction
+- post-reduction projection that still uses `REF`
+- projection items without stable output names
+
+## JSON and metadata
+
+`QX` and `Expr` implement JSON marshal and unmarshal to speed up some encoding/decoding paths.
+
+Metadata can travel with the query itself:
+
+```go
+q := qx.
+    Query(
+        qx.EQ("tenant_id", "t-1"),
+        qx.EQ("status", "paid"),
+    ).
+    Meta("trace.id", "req-42").
+    Meta("transport", map[string]any{
+        "source": "rpc",
+        "actor":  "ops-ui",
+    })
+```
+
+Metadata behavior:
+
+- entries are stored in insertion order
+- `Meta(key, value)` replaces an existing entry with the same key
+- `MetaValue(key)` reads a value by key
+- `DeleteMeta(keys...)` removes metadata entries
+- metadata is serialized under the top-level `meta` field
+- metadata is preserved by `Clone`, `Normalize`, `Validate`, and JSON round-trips
+
+## Custom operations
+
+`OP(name, args...)` makes it possible to carry backend-specific or
+application-specific operations inside the same IR:
 
 ```go
 q := qx.Query(
-    qx.EQ("status", "active"),
-    qx.GTE("age", 21),
-).
-By("created_at", qx.DESC).
-Page(1, 50)
-```
-`Query` and `Where` are equivalent and can be used interchangeably.
-
-See the [GoDoc](https://godoc.org/github.com/vapstack/qx) for a complete API reference.
-
-## In-Memory Matcher
-
-`qx` also provides an optional in-memory matcher that can evaluate expressions against Go structs.
-
-This is useful when:
-- there is no index
-- data is already in memory
-- expressions must be evaluated many times
-
-```go
-m := qx.MatcherFor[User]()
-```
-
-The matcher:
-- inspects the struct type once
-- caches reflection metadata
-- supports field lookup by Go name and struct tags (json, db, ...)
-
-### One-shot matching
-
-For occasional checks:
-```go
-match, err := qx.Match(user, EQ("age", 30))
-```
-
-or, using a matcher instance:
-```go
-m, err := qx.MatcherFor[User]()
-// ...
-match, err := m.Match(user, EQ("age", 30))
-```
-
-### Compiled predicates (recommended)
-
-For repeated evaluations of the same expression:
-
-```go
-check, err := m.Compile(
-    qx.AND(
-        GTE("age", 18),
-        EQ("active", true),
-    )
+    qx.OP("glob", qx.LOWER("customer_email"), qx.LIT("*@example.com")),
 )
-// ...
-for _, v := range values {
-    match, err := check(v)
-    // ...
-}
 ```
 
-Compiled predicates:
-- avoid repeated expression traversal
-- use fast paths when possible
-- can be safely reused across calls
+Unknown operation names are allowed by `Validate` as long as the expression is
+otherwise well-formed. Support is a translator policy decision, not a property
+of the IR itself.
 
-### Value handling
+## Helper overview
 
-Matcher methods accept:
-- struct values (T)
-- pointers to structs (*T)
-- interfaces wrapping either
+Predicate and logical helpers:
 
-Passing a pointer enables additional fast paths based on unsafe offsets.\
-Passing `nil` always results in `(false, nil)`.
+- comparisons:\
+  `EQ`, `NE`, `NOTEQ`, `GT`, `GTE`, `LT`, `LTE`, `BETWEEN`
+- sets and null checks:\
+  `IN`, `NOTIN`, `HASALL`, `HASANY`, `HASNONE`, `EXISTS`, `MISSING`, `ISNULL`, `NOTNULL`
+- string predicates:\
+  `PREFIX`, `SUFFIX`, `CONTAINS`, `LIKE`, `NOTLIKE`, `ILIKE`, `NOTILIKE`, `MATCHES`
+- logical composition:\
+  `AND`, `OR`, `NOT`
 
-### Equality semantics
+Scalar helpers:
 
-Equality is defined in terms of data, not pointer identity:
-- pointers are compared by the values they point to
-- interfaces are unwrapped
-- structs are compared field-by-field
-- slices use element-wise comparison where applicable
+- string and collection:\
+  `LEN`, `POS`, `LOWER`, `UPPER`, `TRIM`, `REPLACE`,
+  `SPLIT`, `SUBSTR`, `CONCAT`
+- temporal:\
+  `DATETRUNC`, `EXTRACT`, `NOW`, `DATEADD`, `DATEDIFF`
+- numeric:\
+  `ABS`, `ROUND`, `FLOOR`, `CEIL`
+- generic:\
+  `COALESCE`, `NULLIF`, `IF`, `DISTINCT`, `RANK`, `GREATEST`, `LEAST`
+- arithmetic:\
+  `ADD`, `SUB`, `MUL`, `DIV`, `MOD`
 
-This makes the matcher suitable for “document-style” filtering.
+Aggregate helpers:
+- `COUNT`, `ROWCOUNT`, `SUM`, `AVG`, `MIN`, `MAX`
 
-### Performance characteristics
-
-- No allocations on the fast path for scalar comparisons
-- Optional unsafe field access when values are passed as *T
-- Reflection metadata cached per type
-- Expression compilation amortizes cost over repeated runs
-
-Rough estimates:
-- Simple scalar predicates: tens of nanoseconds
-- Mixed predicates: tens to hundreds of nanoseconds
-- Complex structures (slices, nested structs): higher cost, still allocation-aware
+See [GoDoc](https://pkg.go.dev/github.com/vapstack/qx) for the full API reference

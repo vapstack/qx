@@ -1,8 +1,7 @@
 package qx
 
 import (
-	"fmt"
-	"strconv"
+	"slices"
 	"strings"
 )
 
@@ -11,12 +10,7 @@ import (
 //
 // Query and Where functions are completely equivalent.
 func Query(expressions ...Expr) *QX {
-	if len(expressions) == 0 {
-		return new(QX)
-	} else if len(expressions) == 1 {
-		return &QX{Expr: expressions[0]}
-	}
-	return &QX{Expr: AND(expressions...)}
+	return new(QX).Where(expressions...)
 }
 
 // Where creates a new QX and sets the provided expressions as part of the root AND group.
@@ -24,222 +18,357 @@ func Query(expressions ...Expr) *QX {
 //
 // Where and Query functions are completely equivalent.
 func Where(expressions ...Expr) *QX {
-	if len(expressions) == 0 {
-		return new(QX)
-	} else if len(expressions) == 1 {
-		return &QX{Expr: expressions[0]}
-	}
-	return &QX{Expr: AND(expressions...)}
+	return new(QX).Where(expressions...)
 }
 
-// EQ builds an equality expression: field == value.
-func EQ(f string, v any) Expr { return Expr{Op: OpEQ, Field: f, Value: v} }
+// KindNONE is the zero expression kind.
+const KindNONE = ""
 
-// NE builds a negated equality expression: field != value.
-func NE(f string, v any) Expr { return Expr{Op: OpEQ, Not: true, Field: f, Value: v} }
+// Special forms
+const (
+	KindREF = "ref"
+	KindOUT = "out"
+	KindLIT = "lit"
+	KindOP  = "op"
+)
 
-// NOTEQ is an alias of NE and builds a negated equality expression: field != value.
-func NOTEQ(f string, v any) Expr { return Expr{Op: OpEQ, Not: true, Field: f, Value: v} }
+// Aggregate creates a new QX and appends the provided metrics to its reduction stage.
+func Aggregate(metrics ...Expr) *QX { return new(QX).Metrics(metrics...) }
 
-// GT builds a greater-than expression: field > value.
-func GT(f string, v any) Expr { return Expr{Op: OpGT, Field: f, Value: v} }
+// Metrics creates a new QX and appends the provided metrics to its reduction stage.
+func Metrics(metrics ...Expr) *QX { return new(QX).Metrics(metrics...) }
 
-// GTE builds a greater-than-or-equal expression: field >= value.
-func GTE(f string, v any) Expr { return Expr{Op: OpGTE, Field: f, Value: v} }
+// Group creates a new QX and appends the provided document fields as grouping keys.
+// Without metrics this acts as a DISTINCT-style grouping over the selected keys.
+func Group(fields ...string) *QX { return new(QX).Group(fields...) }
 
-// LT builds a less-than expression: field < value.
-func LT(f string, v any) Expr { return Expr{Op: OpLT, Field: f, Value: v} }
+// GroupBy creates a new QX and appends the provided grouping expressions.
+// Without metrics this acts as a DISTINCT-style grouping over the selected keys.
+func GroupBy(expressions ...Expr) *QX { return new(QX).GroupBy(expressions...) }
 
-// LTE builds a less-than-or-equal expression: field <= value.
-func LTE(f string, v any) Expr { return Expr{Op: OpLTE, Field: f, Value: v} }
+// Fields creates a new QX and appends the provided source fields or expressions
+// to its final projection.
+func Fields[T string | Expr](expressions ...T) *QX { return Select(expressions...) }
 
-// IN builds a set-membership expression: field IN valueSlice.
-// The provided value must be a slice; the field is compared against each element of the slice.
-func IN(f string, v any) Expr { return Expr{Op: OpIN, Field: f, Value: v} }
+// FieldsOut creates a new QX and appends the provided reduction outputs to its final projection.
+func FieldsOut(names ...string) *QX { return new(QX).SelectOut(names...) }
 
-// NOTIN builds a negated set-membership expression: field NOT IN valueSlice.
-// The provided value must be a slice; the field is compared against each element of the slice.
-func NOTIN(f string, v any) Expr { return Expr{Op: OpIN, Not: true, Field: f, Value: v} }
+// Select creates a new QX and appends the provided source fields or expressions
+// to its final projection.
+func Select[T string | Expr](expressions ...T) *QX {
+	qx := new(QX)
+	if len(expressions) == 0 {
+		return qx
+	}
+	qx.Projection = slices.Grow(qx.Projection, len(expressions))
+	for _, expr := range expressions {
+		qx.Projection = append(qx.Projection, exprArg(expr))
+	}
+	return qx
+}
 
-// HAS builds a slice containment expression for slice fields:
-// the field slice must contain all elements from the provided value slice.
-func HAS(f string, v any) Expr { return Expr{Op: OpHAS, Field: f, Value: v} }
+// SelectOut creates a new QX and appends the provided reduction outputs to its final projection.
+func SelectOut(names ...string) *QX { return new(QX).SelectOut(names...) }
 
-// HASANY builds a slice intersection expression for slice fields:
-// the field slice must share at least one element with the provided value slice.
-func HASANY(f string, v any) Expr { return Expr{Op: OpHASANY, Field: f, Value: v} }
+// REF builds a reference to a source document field.
+func REF(name string) Expr { return Expr{Kind: KindREF, Name: name} }
 
-// HASNOT builds a negated slice containment expression for slice fields.
-// It matches when the field slice does not contain all elements from the provided value slice
-// (i.e., at least one of the provided values is missing).
-// HASNOT is the logical equivalent of NOT(HAS(...)).
-func HASNOT(f string, v any) Expr { return Expr{Op: OpHAS, Not: true, Field: f, Value: v} }
+// OUT builds a reference to an output name produced by grouping or aggregation.
+func OUT(name string) Expr { return Expr{Kind: KindOUT, Name: name} }
 
-// HASNONE builds an expression that matches when the slice field contains none of the provided values.
-// It evaluates to true only if the intersection between the field slice and the provided values is empty.
-// HASNONE is the logical equivalent of NOT(HASANY(...)).
-func HASNONE(f string, v any) Expr { return Expr{Op: OpHASANY, Not: true, Field: f, Value: v} }
+// LIT builds a literal term.
+func LIT(v any) Expr { return Expr{Kind: KindLIT, Value: v} }
 
-// PREFIX builds an expression that matches when the string field starts with the provided prefix.
-func PREFIX(f string, v any) Expr { return Expr{Op: OpPREFIX, Field: f, Value: v} }
-
-// SUFFIX builds an expression that matches when the string field ends with the provided suffix.
-func SUFFIX(f string, v any) Expr { return Expr{Op: OpSUFFIX, Field: f, Value: v} }
-
-// CONTAINS builds an expression that matches when the string field contains the provided substring.
-func CONTAINS(f string, v any) Expr { return Expr{Op: OpCONTAINS, Field: f, Value: v} }
-
-// AND builds a conjunction expression combining all provided expressions.
-func AND(exprs ...Expr) Expr { return Expr{Op: OpAND, Operands: exprs} }
-
-// OR builds a disjunction expression combining all provided expressions.
-func OR(exprs ...Expr) Expr { return Expr{Op: OpOR, Operands: exprs} }
-
-// NOT negates the provided expression by setting Not flag.
-func NOT(exp Expr) Expr {
-	exp.Not = !exp.Not
-	return exp
+// OP builds a generic function expression.
+func OP[T string | Op](name T, args ...Expr) Expr {
+	return Expr{
+		Kind: KindOP,
+		Name: strings.TrimSpace(string(name)),
+		Args: args,
+	}
 }
 
 type (
-	// QX represents a compiled query description.
-	// It combines a filter expression, optional ordering rules, offset and limit.
+	// QX represents a query.
+	// It combines a filter expression, an optional reduction stage,
+	// optional ordering rules, an optional result window, and an optional
+	// final projection stage.
 	QX struct {
-		Key    string // optional cache key
-		Expr   Expr
-		Order  []Order
-		Offset uint64
-		Limit  uint64
+		Filter     Expr        `json:"filter,omitempty"`
+		Reduction  *Reduction  `json:"reduction,omitempty"`
+		Order      []Order     `json:"order,omitempty"`
+		Window     Window      `json:"window,omitempty"`
+		Projection []Expr      `json:"projection,omitempty"`
+		Metadata   []MetaEntry `json:"meta,omitempty"`
 	}
 
-	Op byte
+	// MetaEntry carries an opaque user-defined metadata value alongside a query.
+	// qx preserves these entries during clone, validation, normalization, and JSON round-trips
+	// but does not interpret their meaning.
+	MetaEntry struct {
+		Key   string `json:"key"`
+		Value any    `json:"value,omitempty"`
+	}
 
-	// Expr represents a single filter expression or a logical group of expressions.
-	// Depending on Op, an Expr may represent:
-	//   - a scalar comparison (EQ, GT, LT, etc.),
-	//   - a slice operation (IN, HAS, HASANY),
-	//   - or a logical operation (AND, OR) combining sub-expressions.
+	// Op identifies an operation name in the query IR.
+	Op string
+
+	// Expr is a single query IR node.
 	//
-	// For logical operations, Operands contains the nested expressions.
-	// For non-logical operations, Field and Value describe the comparison.
-	// If Not is set, the result of the expression is logically negated.
+	// Expr may represent:
+	//   - a reference (Kind: KindREF, KindOUT)
+	//   - a literal (Kind: KIndLIT)
+	//   - a named function-like expression (Kind: KindOP)
+	//
+	// Kind represents the node type: REF, OUT, LIT, OP.
+	// REF and OUT nodes use Name. LIT nodes use Value.
+	// OP expressions use Args to hold child expressions.
 	Expr struct {
-		Op       Op
-		Not      bool
-		Field    string
-		Value    any
-		Operands []Expr
+		Kind  string `json:"kind,omitempty"`
+		Name  string `json:"name,omitempty"`
+		Alias string `json:"alias,omitempty"`
+		Value any    `json:"value,omitempty"`
+		Args  []Expr `json:"args,omitempty"`
 	}
 
 	// Order describes a single ordering rule applied to query results.
-	// The meaning of Data depends on the ordering Type.
 	// If Desc is true, the ordering is descending; otherwise ascending.
 	Order struct {
-		Field string
-		Type  OrderType
-		Data  any
-		Desc  bool
+		By   Expr `json:"by,omitempty"`
+		Desc bool `json:"desc,omitempty"`
 	}
 
-	OrderType      byte
+	// Window describes pagination bounds applied to query results.
+	Window struct {
+		Offset uint64 `json:"offset,omitempty"`
+		Limit  uint64 `json:"limit,omitempty"`
+	}
+
+	// Reduction describes the optional reduce stage of the query.
+	// Group defines grouping expressions, Metrics defines aggregate outputs,
+	// and Having filters rows after the reduction has been applied.
+	Reduction struct {
+		Group   []Expr `json:"group,omitempty"`
+		Metrics []Expr `json:"metrics,omitempty"`
+		Having  Expr   `json:"having,omitempty"`
+	}
+
+	// OrderDirection specifies sort direction.
 	OrderDirection byte
 )
 
 const (
-	ASC  OrderDirection = 0
+	// ASC sorts in ascending order.
+	ASC OrderDirection = 0
+	// DESC sorts in descending order.
 	DESC OrderDirection = 1
 )
 
-const (
-	OrderBasic OrderType = iota
-	OrderByArrayPos
-	OrderByArrayCount
-)
+// IsEmpty reports whether reduction has no structural content.
+// It is safe to call on a nil receiver.
+func (reduction *Reduction) IsEmpty() bool {
+	if reduction == nil {
+		return true
+	}
+	return len(reduction.Group) == 0 && len(reduction.Metrics) == 0 && reduction.Having.IsZero()
+}
 
-// Where combines the current expression with exprs using logical AND.
-func (qx *QX) Where(exprs ...Expr) *QX {
-	if qx.Expr.Op == OpNOOP {
-		qx.Expr = AND(exprs...)
-	} else if qx.Expr.Op == OpAND {
-		qx.Expr.Operands = append(qx.Expr.Operands, exprs...)
-	} else {
-		expr := Expr{Op: OpAND, Operands: make([]Expr, 0, len(exprs)+1)}
-		expr.Operands = append(expr.Operands, qx.Expr)
-		expr.Operands = append(expr.Operands, exprs...)
-		qx.Expr = expr
+// HasReduction reports whether query contains a non-empty reduction stage.
+// It is safe to call on a nil receiver.
+func (qx *QX) HasReduction() bool {
+	return qx != nil && !qx.Reduction.IsEmpty()
+}
+
+// Where combines the current expression with expressions using logical AND.
+func (qx *QX) Where(expressions ...Expr) *QX {
+	if len(expressions) == 0 {
+		return qx
+	}
+	if qx.Filter.Kind == KindOP && qx.Filter.Name == OpAND {
+		qx.Filter.Args = append(qx.Filter.Args, expressions...)
+		return qx
+	}
+	if qx.Filter.Kind == KindNONE {
+		if len(expressions) == 1 {
+			qx.Filter = expressions[0]
+		} else {
+			qx.Filter = AND(expressions...)
+		}
+		return qx
+	}
+	expr := AND()
+	expr.Args = slices.Grow(expr.Args, len(expressions)+1)
+	expr.Args = append(expr.Args, qx.Filter)
+	expr.Args = append(expr.Args, expressions...)
+	qx.Filter = expr
+	return qx
+}
+
+// Sort adds a sort order by a source field.
+// If dir is omitted, ascending order is used.
+func (qx *QX) Sort(field string, dir ...OrderDirection) *QX {
+	return qx.SortBy(REF(field), dir...)
+}
+
+// SortOut adds a sort order by a reduction output.
+// If dir is omitted, ascending order is used.
+func (qx *QX) SortOut(name string, dir ...OrderDirection) *QX {
+	return qx.SortBy(OUT(name), dir...)
+}
+
+// SortBy adds a sort order by an expression.
+// If dir is omitted, ascending order is used.
+func (qx *QX) SortBy(expr Expr, dir ...OrderDirection) *QX {
+	if expr.Kind == KindNONE {
+		return qx
+	}
+	desc := false
+	if len(dir) > 0 {
+		desc = dir[0] == DESC
+	}
+	qx.Order = append(qx.Order, Order{
+		By:   expr,
+		Desc: desc,
+	})
+	return qx
+}
+
+// Aggregate appends metrics to the query reduction stage.
+func (qx *QX) Aggregate(metrics ...Expr) *QX { return qx.Metrics(metrics...) }
+
+// Metrics appends metrics to the query reduction stage.
+func (qx *QX) Metrics(metrics ...Expr) *QX {
+	if len(metrics) == 0 {
+		return qx
+	}
+	if qx.Reduction == nil {
+		qx.Reduction = new(Reduction)
+	}
+	qx.Reduction.Metrics = append(qx.Reduction.Metrics, metrics...)
+	return qx
+}
+
+// Group appends document fields as grouping keys.
+// Without metrics this acts as a DISTINCT-style grouping over the selected keys.
+func (qx *QX) Group(fields ...string) *QX {
+	if len(fields) == 0 {
+		return qx
+	}
+	if qx.Reduction == nil {
+		qx.Reduction = new(Reduction)
+	}
+	qx.Reduction.Group = slices.Grow(qx.Reduction.Group, len(fields))
+	for _, field := range fields {
+		qx.Reduction.Group = append(qx.Reduction.Group, REF(field))
 	}
 	return qx
 }
 
-// OR combines the current expression with exprs using logical OR.
-/* -- currently removed
-func (qx *QX) OR(exprs ...Expr) *QX {
-	if qx.Expr.Op == OpNOOP {
-		qx.Expr = OR(exprs...)
-	} else if qx.Expr.Op == OpOR {
-		qx.Expr.Operands = append(qx.Expr.Operands, exprs...)
-	} else {
-		expr := Expr{Op: OpOR, Operands: make([]Expr, 0, len(exprs)+1)}
-		expr.Operands = append(expr.Operands, qx.Expr)
-		expr.Operands = append(expr.Operands, exprs...)
-		qx.Expr = expr
+// GroupBy appends grouping expressions.
+// Without metrics this acts as a DISTINCT-style grouping over the selected keys.
+func (qx *QX) GroupBy(expressions ...Expr) *QX {
+	if len(expressions) == 0 {
+		return qx
+	}
+	if qx.Reduction == nil {
+		qx.Reduction = new(Reduction)
+	}
+	qx.Reduction.Group = append(qx.Reduction.Group, expressions...)
+	return qx
+}
+
+// Having adds post-reduction predicates with AND semantics.
+// Expressions in Having that refer to reduction outputs should use OUT(...).
+func (qx *QX) Having(expressions ...Expr) *QX {
+	if len(expressions) == 0 {
+		return qx
+	}
+	if qx.Reduction == nil {
+		qx.Reduction = new(Reduction)
+	}
+	if qx.Reduction.Having.Kind == KindOP && qx.Reduction.Having.Name == OpAND {
+		qx.Reduction.Having.Args = append(qx.Reduction.Having.Args, expressions...)
+		return qx
+	}
+	if qx.Reduction.Having.Kind == KindNONE {
+		if len(expressions) == 1 {
+			qx.Reduction.Having = expressions[0]
+		} else {
+			qx.Reduction.Having = AND(expressions...)
+		}
+		return qx
+	}
+	expr := AND()
+	expr.Args = slices.Grow(expr.Args, len(expressions)+1)
+	expr.Args = append(expr.Args, qx.Reduction.Having)
+	expr.Args = append(expr.Args, expressions...)
+	qx.Reduction.Having = expr
+	return qx
+}
+
+// Fields appends source-field references to the final projection stage.
+func (qx *QX) Fields(fields ...string) *QX {
+	return qx.Select(fields...)
+}
+
+// Select appends source-field references to the final projection stage.
+func (qx *QX) Select(fields ...string) *QX {
+	if len(fields) == 0 {
+		return qx
+	}
+	qx.Projection = slices.Grow(qx.Projection, len(fields))
+	for _, field := range fields {
+		qx.Projection = append(qx.Projection, REF(field))
 	}
 	return qx
 }
-*/
 
-// CacheKey sets an optional cache key associated with the query.
-func (qx *QX) CacheKey(key string) *QX {
-	qx.Key = key
+// FieldsOut appends reduction-output references to the final projection stage.
+func (qx *QX) FieldsOut(names ...string) *QX {
+	return qx.SelectOut(names...)
+}
+
+// SelectOut appends reduction-output references to the final projection stage.
+func (qx *QX) SelectOut(names ...string) *QX {
+	if len(names) == 0 {
+		return qx
+	}
+	qx.Projection = slices.Grow(qx.Projection, len(names))
+	for _, name := range names {
+		qx.Projection = append(qx.Projection, OUT(name))
+	}
 	return qx
 }
 
-// By adds a basic sort order by field; dir may be ASC or DESC.
-func (qx *QX) By(field string, dir OrderDirection) *QX {
-	qx.Order = append(qx.Order, Order{
-		Field: field,
-		Type:  OrderBasic,
-		Desc:  dir == DESC,
-	})
+// FieldsExpr appends expressions to the final projection stage.
+func (qx *QX) FieldsExpr(expressions ...Expr) *QX {
+	return qx.SelectExpr(expressions...)
+}
+
+// SelectExpr appends expressions to the final projection stage.
+func (qx *QX) SelectExpr(expressions ...Expr) *QX {
+	if len(expressions) == 0 {
+		return qx
+	}
+	qx.Projection = append(qx.Projection, expressions...)
 	return qx
 }
 
-// ByArrayPos adds an ordering rule by the position of field's value within the provided slice; dir may be ASC or DESC.
-func (qx *QX) ByArrayPos(field string, slice any, dir OrderDirection) *QX {
-	qx.Order = append(qx.Order, Order{
-		Field: field,
-		Type:  OrderByArrayPos,
-		Data:  slice,
-		Desc:  dir == DESC,
-	})
-	return qx
-}
-
-// ByArrayCount adds an ordering rule by the number of items in a slice field; dir may be ASC or DESC.
-func (qx *QX) ByArrayCount(field string, dir OrderDirection) *QX {
-	qx.Order = append(qx.Order, Order{
-		Field: field,
-		Type:  OrderByArrayCount,
-		Desc:  dir == DESC,
-	})
-	return qx
-}
-
-// Skip sets the query offset (number of items to skip). It panics if offset is negative.
-func (qx *QX) Skip(offset int) *QX {
+// Offset sets the query offset (number of items to skip). It panics if offset is negative.
+func (qx *QX) Offset(offset int) *QX {
 	if offset < 0 {
-		panic("qx.Skip: negative value")
+		panic("qx.Offset: negative value")
 	}
-	qx.Offset = uint64(offset)
+	qx.Window.Offset = uint64(offset)
 	return qx
 }
 
-// Max sets the query limit (maximum number of items to return). It panics if limit is negative.
-func (qx *QX) Max(limit int) *QX {
+// Limit sets the query limit (maximum number of items to return). It panics if limit is negative.
+func (qx *QX) Limit(limit int) *QX {
 	if limit < 0 {
-		panic("qx.Max: negative limit")
+		panic("qx.Limit: negative limit")
 	}
-	qx.Limit = uint64(limit)
+	qx.Window.Limit = uint64(limit)
 	return qx
 }
 
@@ -252,200 +381,149 @@ func (qx *QX) Page(pageNum, perPage int) *QX {
 	if perPage <= 0 {
 		panic("qx.Page: perPage must be positive")
 	}
-	qx.Offset = uint64((pageNum - 1) * perPage)
-	qx.Limit = uint64(perPage)
+	qx.Window.Offset = uint64((pageNum - 1) * perPage)
+	qx.Window.Limit = uint64(perPage)
 	return qx
 }
 
-// UsedFields returns a de-duplicated list of field names referenced by the query expression
-// and sort orders. The returned slice includes fields from nested expressions.
+// UsedFields returns a de-duplicated list of source document fields referenced by the query.
 func (qx *QX) UsedFields() []string {
-	s := make([]string, 0, 8)
+	if qx == nil {
+		return nil
+	}
+	s := appendUsedFields(qx.Filter, make([]string, 0, 8))
 
-	usedFields(qx.Expr, &s)
-
+	if qx.HasReduction() {
+		for _, key := range qx.Reduction.Group {
+			s = appendUsedFields(key, s)
+		}
+		for _, metric := range qx.Reduction.Metrics {
+			s = appendUsedFields(metric, s)
+		}
+		s = appendUsedFields(qx.Reduction.Having, s)
+	}
 	for _, o := range qx.Order {
-		add := true
-		for _, f := range s {
-			if f == o.Field {
-				add = false
-				break
-			}
-		}
-		if add {
-			s = append(s, o.Field)
-		}
+		s = appendUsedFields(o.By, s)
+	}
+	for _, expr := range qx.Projection {
+		s = appendUsedFields(expr, s)
 	}
 	return s
 }
 
-func usedFields(exp Expr, s *[]string) {
-	if exp.Field != "" {
-		add := true
-		for _, f := range *s {
-			if f == exp.Field {
-				add = false
-				break
-			}
-		}
-		if add {
-			*s = append(*s, exp.Field)
+// Meta sets or replaces a metadata entry by key while preserving insertion order.
+func (qx *QX) Meta(key string, value any) *QX {
+	for i := range qx.Metadata {
+		if qx.Metadata[i].Key == key {
+			qx.Metadata[i].Value = value
+			return qx
 		}
 	}
-	for _, op := range exp.Operands {
-		usedFields(op, s)
+
+	qx.Metadata = append(qx.Metadata, MetaEntry{
+		Key:   key,
+		Value: value,
+	})
+	return qx
+}
+
+// MetaValue reports the metadata value associated with key.
+func (qx *QX) MetaValue(key string) (any, bool) {
+	if qx == nil {
+		return nil, false
 	}
+
+	for i := range qx.Metadata {
+		if qx.Metadata[i].Key == key {
+			return qx.Metadata[i].Value, true
+		}
+	}
+
+	return nil, false
+}
+
+// DeleteMeta removes metadata entries matching any of the provided keys.
+func (qx *QX) DeleteMeta(keys ...string) *QX {
+	if qx == nil || len(keys) == 0 || len(qx.Metadata) == 0 {
+		return qx
+	}
+
+	qx.Metadata = slices.DeleteFunc(qx.Metadata, func(entry MetaEntry) bool {
+		return slices.Contains(keys, entry.Key)
+	})
+	return qx
+}
+
+// AS sets the expression alias.
+func (expr Expr) AS(alias string) Expr {
+	expr.Alias = alias
+	return expr
+}
+
+// OutputName reports the output name implied by the expression root.
+// Aliased expressions use Alias. Bare REF and OUT expressions use Name.
+func (expr Expr) OutputName() (string, bool) {
+	if alias := strings.TrimSpace(expr.Alias); alias != "" {
+		return alias, true
+	}
+	switch expr.Kind {
+	case KindREF, KindOUT:
+		if name := strings.TrimSpace(expr.Name); name != "" {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// IsZero reports whether expression is empty.
+func (expr Expr) IsZero() bool {
+	return expr.Kind == KindNONE && expr.Name == "" && expr.Alias == "" && expr.Value == nil && len(expr.Args) == 0
+}
+
+// Is reports whether expression has the provided kind and operation name.
+func (expr Expr) Is(kind string, op string) bool { return expr.Kind == kind && expr.Name == op }
+
+func appendUsedFields(exp Expr, s []string) []string {
+	if exp.Kind == KindREF && exp.Name != "" {
+		s = appendUnique(s, exp.Name)
+	}
+	for _, op := range exp.Args {
+		s = appendUsedFields(op, s)
+	}
+	return s
+}
+
+func appendUnique(dst []string, field string) []string {
+	for _, f := range dst {
+		if f == field {
+			return dst
+		}
+	}
+	return append(dst, field)
 }
 
 // UsedFields returns a de-duplicated list of field names referenced by the expression.
 // The returned slice includes fields from nested expressions.
 func (expr Expr) UsedFields() []string {
-	s := make([]string, 0, 8)
-	usedFields(expr, &s)
-	return s
+	return appendUsedFields(expr, make([]string, 0, 8))
 }
 
-const (
-	OpNOOP Op = iota
-
-	OpAND
-	OpOR
-
-	OpEQ
-	OpGT
-	OpGTE
-	OpLT
-	OpLTE
-	OpIN
-
-	OpHAS    // for array fields - contains at least all the provided values
-	OpHASANY // for array fields - has intersection with the provided values
-
-	OpPREFIX   // has prefix
-	OpSUFFIX   // has suffix
-	OpCONTAINS // contains substring
-)
-
-var QueryOpString = map[Op]string{
-	OpNOOP:     "NOOP",
-	OpAND:      "AND",
-	OpOR:       "OR",
-	OpEQ:       "EQ",
-	OpGT:       "GT",
-	OpGTE:      "GTE",
-	OpLT:       "LT",
-	OpLTE:      "LTE",
-	OpIN:       "IN",
-	OpHAS:      "HAS",
-	OpHASANY:   "HASANY",
-	OpPREFIX:   "PREFIX",
-	OpSUFFIX:   "SUFFIX",
-	OpCONTAINS: "CONTAINS",
-}
-
-var QueryOpValue = map[string]Op{
-	"NOOP":     OpNOOP,
-	"AND":      OpAND,
-	"OR":       OpOR,
-	"EQ":       OpEQ,
-	"GT":       OpGT,
-	"GTE":      OpGTE,
-	"LT":       OpLT,
-	"LTE":      OpLTE,
-	"IN":       OpIN,
-	"HAS":      OpHAS,
-	"HASANY":   OpHASANY,
-	"PREFIX":   OpPREFIX,
-	"SUFFIX":   OpSUFFIX,
-	"CONTAINS": OpCONTAINS,
-}
-
-func (q Op) String() string {
-	if s, ok := QueryOpString[q]; ok {
-		return s
+func exprArg[T string | Expr](v T) Expr {
+	switch x := any(v).(type) {
+	case Expr:
+		return x
+	case string:
+		return REF(x)
+	default:
+		panic("expected field path or Expr")
 	}
-	return fmt.Sprintf("OP(%d)", byte(q))
 }
 
-func (q *Op) UnmarshalJSON(bytes []byte) error {
-	str, err := strconv.Unquote(string(bytes))
-	if err != nil {
-		return err
-	}
-	op, ok := QueryOpValue[strings.ToUpper(str)]
-	if !ok {
-		return fmt.Errorf("unknown op: \"%v\"", str)
-	}
-	*q = op
-	return nil
-}
-
-func (q Op) MarshalJSON() ([]byte, error) {
-	v, ok := QueryOpString[q]
-	if !ok {
-		return nil, fmt.Errorf("unknown op value: %v", q)
-	}
-	return []byte(strconv.Quote(v)), nil
-}
-
-// Normalize applies only semantics-preserving structural rewrites to qx in place.
-// It avoids backend-specific rewrites such as De Morgan, NNF/DNF/CNF conversion, or reordering.
-// The function keeps query metadata, ordering and pagination intact and returns qx.
-func Normalize(qx *QX) *QX {
-	if qx == nil {
-		return nil
-	}
-	normalizeExpr(&qx.Expr)
-	return qx
-}
-
-func normalizeExpr(expr *Expr) {
-	switch expr.Op {
-	case OpAND, OpOR:
-		for i := range expr.Operands {
-			normalizeExpr(&expr.Operands[i])
-		}
-
-		total := len(expr.Operands)
-		flatten := false
-
-		for i := range expr.Operands {
-			sub := expr.Operands[i]
-			if sub.Op == expr.Op && !sub.Not {
-				flatten = true
-				total += len(sub.Operands) - 1
-			}
-		}
-
-		if flatten {
-			src := expr.Operands
-			var dst []Expr
-
-			if total <= cap(src) {
-				dst = src[:total]
-			} else {
-				dst = make([]Expr, total)
-			}
-
-			write := total
-			for i := len(src) - 1; i >= 0; i-- {
-				sub := src[i]
-				if sub.Op == expr.Op && !sub.Not {
-					write -= len(sub.Operands)
-					copy(dst[write:], sub.Operands)
-				} else {
-					write--
-					dst[write] = sub
-				}
-			}
-
-			expr.Operands = dst[write:]
-		}
-
-		if len(expr.Operands) == 1 {
-			only := expr.Operands[0]
-			only.Not = only.Not != expr.Not
-			*expr = only
-		}
+func valueArg(v any) Expr {
+	switch x := v.(type) {
+	case Expr:
+		return x
+	default:
+		return LIT(v)
 	}
 }
