@@ -3,7 +3,8 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/vapstack/qx.svg)](https://pkg.go.dev/github.com/vapstack/qx)
 [![License](https://img.shields.io/badge/license-Apache%202-blue.svg)](LICENSE)
 
-Backend-agnostic query builder, filter AST and query IR for Go.
+Backend-agnostic query builder, filter AST and query IR for Go.\
+Initially, QX name was from **Q**uery e**X**pression.
 
 It represents query intent as data instead of backend-specific syntax.
 `QX` can carry filters, scalar expressions, grouping, aggregates, ordering,
@@ -13,11 +14,11 @@ Another layer can validate, normalize, serialize and translate it into SQL,
 a document-store query, a search request, or some other backend-specific form.
 
 It does not execute queries.\
-It also does not model joins or subqueries.
+It also **does not model joins or subqueries**.
 
 ## Use cases
 
-- It is not known which backend will execute the query.
+- When it is not known which backend will execute the query.
 - Application code should not depend on a PostgreSQL, ClickHouse, Mongo,
   Elasticsearch or other specific builder or syntax.
 - The same filtering, ordering, and pagination contract must work across
@@ -27,11 +28,10 @@ It also does not model joins or subqueries.
 - Queries should cross package or service boundaries before translation happens.
 - Validation and normalization should happen before a backend-specific layer.
 
-QX is usually not the right abstraction when:
+QX is not the right abstraction when:
 
 - the query model depends on joins or subqueries
-- the public API is intentionally tied to one concrete backend and its native
-  query language
+- the public API is tied to one concrete backend and its native query language
 
 ## Quick start
 
@@ -54,8 +54,6 @@ format happens elsewhere.
 
 ## Query model
 
-A `QX` usually flows through these stages:
-
 ```text
 filter -> reduction -> order -> window -> projection
 ```
@@ -66,15 +64,13 @@ filter -> reduction -> order -> window -> projection
 - **Window**: offset and limit
 - **Projection**: final output shape
 
-Without a reduction stage, the query behaves like a filtered list query. With a
-reduction stage, the query behaves like a grouped or aggregate query.
+Without a reduction stage, the query behaves like a filtered list query.\
+With a reduction stage, the query behaves like a grouped or aggregate query.
 
 ## Builder and IR
 
-The package has two parts:
-
-- a fluent builder on `*QX`
-- a serializable expression tree built from `QX` and `Expr`
+Package has a fluent builder with chaining API.
+There is no build phase, objects can be serialized directly.
 
 The main starting points are:
 
@@ -82,8 +78,10 @@ The main starting points are:
 - reduction-first: `Group`, `GroupBy`, `Metrics`, `Aggregate`
 - projection-first: `Select`, `Fields`, `SelectOut`, `FieldsOut`
 
-Every helper eventually produces an `Expr`. There is only one expression node
-type, with four forms:
+All of them produce `*QX` object.
+
+Predicate/function helpers produce an `Expr`.
+There is only one expression node type, with four forms:
 
 - `REF(name)` for source fields
 - `OUT(name)` for reduction outputs
@@ -96,8 +94,6 @@ built-in helpers.
 
 Builder conventions:
 
-- `Query` and `Where` are equivalent constructors
-- `Select*` and `Fields*` are equivalent constructors
 - repeated `Where` calls append predicates with `AND`
 - repeated `Having` calls append predicates with `AND`
 - in most helpers, the first `string` argument is shorthand for `REF(name)`
@@ -118,8 +114,8 @@ qx.CONCAT(qx.REF("country"), qx.LIT("-"), qx.REF("city"))
 
 ## Filters and expressions
 
-Filters are explicit expression trees. Scalar helpers can be composed anywhere
-an `Expr` is accepted.
+Filters are explicit expression trees.
+Scalar helpers can be composed anywhere an `Expr` is accepted.
 
 ```go
 q := qx.
@@ -132,7 +128,7 @@ q := qx.
             qx.EQ("status", "refunded"),
         ),
         qx.GTE("total_amount", 100),
-        qx.NOT(qx.EXISTS("deleted_at")),
+        qx.EQ("deleted_at", nil), 
         qx.EQ(
             qx.NULLIF(qx.TRIM("promo_code"), ""),
             "spring-2026",
@@ -170,8 +166,6 @@ q := qx.
     SortOut("revenue", qx.DESC).
     SortOut("day")
 ```
-
-Reduction rules worth knowing:
 
 - `Group("country")` is shorthand for grouping by a source field
 - `GroupBy` accepts arbitrary grouping expressions
@@ -279,8 +273,6 @@ q := qx.
     })
 ```
 
-Metadata behavior:
-
 - entries are stored in insertion order
 - `Meta(key, value)` replaces an existing entry with the same key
 - `MetaValue(key)` reads a value by key
@@ -290,8 +282,8 @@ Metadata behavior:
 
 ## Custom operations
 
-`OP(name, args...)` makes it possible to carry backend-specific or
-application-specific operations inside the same IR:
+`OP(name, args...)` allows to carry backend-specific or application-specific 
+operations inside the same IR:
 
 ```go
 q := qx.Query(
