@@ -91,6 +91,13 @@ func HASALL[L string | Expr, T any](left L, right []T) Expr {
 	return OP(OpHASALL, exprArg(left), LIT(right))
 }
 
+// HAS builds a slice containment expression.
+// It matches when the left slice contains the provided value.
+// HAS is a convenience helper for HASALL.
+func HAS[L string | Expr, T any](left L, value T) Expr {
+	return HASALL(left, []T{value})
+}
+
 /**/
 
 const OpHASANY = "has_any"
