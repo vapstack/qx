@@ -42,6 +42,8 @@ func TestValidateAcceptsValidQueries(t *testing.T) {
 					LIKE("email", "%@example.com"),
 					NOTILIKE("role", "ops%"),
 					MATCHES("email", "adm.*@example\\.com"),
+					ISEMPTY("tags"),
+					NOTEMPTY("comments"),
 					NOT(EXISTS("deleted_at")),
 				),
 			),
@@ -274,6 +276,12 @@ func TestValidateRejectsInvalidQueries(t *testing.T) {
 		{
 			name: "invalid arity eq",
 			qx:   Query(Expr{Kind: KindOP, Name: OpEQ, Args: []Expr{REF("status")}}),
+			code: "invalid_arity",
+			path: "filter",
+		},
+		{
+			name: "invalid arity is_empty",
+			qx:   Query(Expr{Kind: KindOP, Name: OpISEMPTY}),
 			code: "invalid_arity",
 			path: "filter",
 		},

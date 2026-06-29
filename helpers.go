@@ -136,6 +136,17 @@ func NOTNULL[T string | Expr](expr T) Expr { return NOT(ISNULL(expr)) }
 
 /**/
 
+const OpISEMPTY = "is_empty"
+
+// ISEMPTY builds an empty-check expression for expr.
+func ISEMPTY[T string | Expr](expr T) Expr { return OP(OpISEMPTY, exprArg(expr)) }
+
+// NOTEMPTY builds a negated empty-check expression for expr.
+// NOTEMPTY is the logical equivalent of NOT(ISEMPTY(...)).
+func NOTEMPTY[T string | Expr](expr T) Expr { return NOT(ISEMPTY(expr)) }
+
+/**/
+
 const OpPREFIX = "prefix"
 
 // PREFIX builds an expression that matches when the left string starts with right.

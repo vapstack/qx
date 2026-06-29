@@ -110,6 +110,16 @@ func TestAdditionalScalarHelpers(t *testing.T) {
 		t.Fatalf("IF() = %#v, want %#v", ifExpr, want)
 	}
 
+	isEmpty := ISEMPTY("tags")
+	if want := OP(OpISEMPTY, REF("tags")); !reflect.DeepEqual(isEmpty, want) {
+		t.Fatalf("ISEMPTY() = %#v, want %#v", isEmpty, want)
+	}
+
+	notEmpty := NOTEMPTY("tags")
+	if want := NOT(ISEMPTY("tags")); !reflect.DeepEqual(notEmpty, want) {
+		t.Fatalf("NOTEMPTY() = %#v, want %#v", notEmpty, want)
+	}
+
 	concat := CONCAT(REF("first_name"), LIT(" "), REF("last_name"))
 	if want := OP(OpCONCAT, REF("first_name"), LIT(" "), REF("last_name")); !reflect.DeepEqual(concat, want) {
 		t.Fatalf("CONCAT() = %#v, want %#v", concat, want)

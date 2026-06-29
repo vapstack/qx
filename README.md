@@ -302,7 +302,7 @@ Predicate and logical helpers:
 - comparisons:\
   `EQ`, `NE`, `NOTEQ`, `GT`, `GTE`, `LT`, `LTE`, `BETWEEN`
 - sets and null checks:\
-  `IN`, `NOTIN`, `HASALL`, `HASANY`, `HASNONE`, `EXISTS`, `MISSING`, `ISNULL`, `NOTNULL`
+  `IN`, `NOTIN`, `HASALL`, `HASANY`, `HASNONE`, `EXISTS`, `MISSING`, `ISNULL`, `NOTNULL`, `ISEMPTY`, `NOTEMPTY`
 - string predicates:\
   `PREFIX`, `SUFFIX`, `CONTAINS`, `LIKE`, `NOTLIKE`, `ILIKE`, `NOTILIKE`, `MATCHES`
 - logical composition:\

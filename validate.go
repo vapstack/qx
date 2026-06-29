@@ -350,7 +350,7 @@ func (v *validator) validateExpr(expr Expr, section validationPathSection, itemI
 
 func (v *validator) validateOpArity(section validationPathSection, itemIndex int, op string, argc int) error {
 	switch op {
-	case OpNOT, OpEXISTS, OpISNULL, OpLEN, OpLOWER, OpUPPER, OpABS, OpFLOOR, OpCEIL, OpDISTINCT, OpSUM, OpAVG, OpMIN, OpMAX:
+	case OpNOT, OpEXISTS, OpISNULL, OpISEMPTY, OpLEN, OpLOWER, OpUPPER, OpABS, OpFLOOR, OpCEIL, OpDISTINCT, OpSUM, OpAVG, OpMIN, OpMAX:
 		if argc != 1 {
 			return v.validationError(section, itemIndex, "invalid_arity", fmt.Sprintf("%s expects exactly 1 argument, got %d", op, argc))
 		}
@@ -443,7 +443,7 @@ func isPredicateExpr(expr Expr) bool {
 func isKnownOp(name string) bool {
 	switch name {
 	case OpEQ, OpNE, OpGT, OpGTE, OpLT, OpLTE,
-		OpIN, OpHASALL, OpHASANY, OpEXISTS, OpISNULL,
+		OpIN, OpHASALL, OpHASANY, OpEXISTS, OpISNULL, OpISEMPTY,
 		OpPREFIX, OpSUFFIX, OpCONTAINS, OpLIKE, OpILIKE, OpMATCHES,
 		OpAND, OpOR, OpNOT,
 		OpLEN, OpPOS, OpLOWER, OpUPPER, OpTRIM,
@@ -465,7 +465,7 @@ func isKnownPredicateOp(name string) bool {
 	case OpAND, OpOR, OpNOT,
 		OpEQ, OpNE, OpGT, OpGTE, OpLT, OpLTE,
 		OpIN, OpHASALL, OpHASANY,
-		OpEXISTS, OpISNULL,
+		OpEXISTS, OpISNULL, OpISEMPTY,
 		OpPREFIX, OpSUFFIX, OpCONTAINS, OpLIKE, OpILIKE, OpMATCHES:
 		return true
 	default:
