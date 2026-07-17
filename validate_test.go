@@ -676,6 +676,44 @@ func assertValidationError(t *testing.T, err error, code string, path string) {
 	}
 }
 
+func TestValidationNameSetFallsBackAfterInlineCapacity(t *testing.T) {
+	var set validationNameSet
+	names := [...]string{
+		"name00", "name01", "name02", "name03",
+		"name04", "name05", "name06", "name07",
+		"name08", "name09", "name10", "name11",
+		"name12", "name13", "name14", "name15",
+		"name16",
+	}
+
+	for i := 0; i < validationInlineNameCount; i++ {
+		if !set.add(names[i]) {
+			t.Fatalf("add(%q) = false, want true", names[i])
+		}
+	}
+	if set.overflow != nil {
+		t.Fatal("inline-capacity set unexpectedly allocated overflow map")
+	}
+
+	if !set.add(names[validationInlineNameCount]) {
+		t.Fatalf("add(%q) = false, want true", names[validationInlineNameCount])
+	}
+	if set.overflow == nil {
+		t.Fatal("set did not create overflow map after exceeding inline capacity")
+	}
+	for _, name := range names {
+		if !set.contains(name) {
+			t.Fatalf("contains(%q) = false, want true", name)
+		}
+	}
+	if set.add(names[0]) {
+		t.Fatalf("duplicate add(%q) = true, want false", names[0])
+	}
+	if set.contains("missing") {
+		t.Fatal("contains(missing) = true, want false")
+	}
+}
+
 var validateBenchSink error
 
 func BenchmarkValidateFilterOnly(b *testing.B) {
@@ -697,6 +735,40 @@ func BenchmarkValidateFilterOnly(b *testing.B) {
 
 func BenchmarkValidateReductionQuery(b *testing.B) {
 	q := benchmarkValidateReductionQuery()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	var err error
+	for i := 0; i < b.N; i++ {
+		err = q.Validate()
+	}
+
+	validateBenchSink = err
+	if err != nil {
+		b.Fatal(err)
+	}
+}
+
+func BenchmarkValidateMetadataProjection(b *testing.B) {
+	q := benchmarkValidateMetadataProjectionQuery()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	var err error
+	for i := 0; i < b.N; i++ {
+		err = q.Validate()
+	}
+
+	validateBenchSink = err
+	if err != nil {
+		b.Fatal(err)
+	}
+}
+
+func BenchmarkValidateWideReduction(b *testing.B) {
+	q := benchmarkValidateWideReductionQuery()
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -757,4 +829,38 @@ func benchmarkValidateReductionQuery() *QX {
 		SortOut("total_amount", DESC).
 		SortOut("avg_amount").
 		SortBy(OUT("rows"), DESC)
+}
+
+func benchmarkValidateMetadataProjectionQuery() *QX {
+	return &QX{
+		Metadata: []MetaEntry{
+			{Key: "trace.id"},
+			{Key: "trace.parent"},
+			{Key: "transport"},
+			{Key: "tenant"},
+			{Key: "request.id"},
+			{Key: "request.source"},
+			{Key: "schema"},
+			{Key: "version"},
+		},
+		Projection: []Expr{
+			REF("field00"), REF("field01"), REF("field02"), REF("field03"),
+			REF("field04"), REF("field05"), REF("field06"), REF("field07"),
+		},
+	}
+}
+
+func benchmarkValidateWideReductionQuery() *QX {
+	return &QX{
+		Reduction: &Reduction{
+			Group: []Expr{
+				REF("field00"), REF("field01"), REF("field02"), REF("field03"),
+				REF("field04"), REF("field05"), REF("field06"), REF("field07"),
+				REF("field08"), REF("field09"), REF("field10"), REF("field11"),
+				REF("field12"), REF("field13"), REF("field14"), REF("field15"),
+				REF("field16"),
+			},
+		},
+		Order: []Order{{By: OUT("field16")}},
+	}
 }

@@ -51,6 +51,7 @@ func (qx *QX) Validate() error {
 	}
 
 	var v validator
+	hasReduction := qx.HasReduction()
 
 	v.resetPath()
 	if err := v.validateMetadata(qx.Metadata); err != nil {
@@ -58,15 +59,15 @@ func (qx *QX) Validate() error {
 	}
 
 	v.resetPath()
-	if err := v.validateOptionalExpr(qx.Filter, validationPathSectionFilter, -1, validationContextFilter); err != nil {
+	if err := v.validateOptionalExpr(&qx.Filter, validationPathSectionFilter, -1, validationContextFilter); err != nil {
 		return err
 	}
 
-	if qx.HasReduction() {
+	if hasReduction {
 		for i := range qx.Reduction.Group {
 			v.resetPath()
 			if err := v.validateRequiredExpr(
-				qx.Reduction.Group[i],
+				&qx.Reduction.Group[i],
 				validationPathSectionReductionGroup,
 				i,
 				validationContextGroup,
@@ -78,7 +79,7 @@ func (qx *QX) Validate() error {
 		for i := range qx.Reduction.Metrics {
 			v.resetPath()
 			if err := v.validateRequiredExpr(
-				qx.Reduction.Metrics[i],
+				&qx.Reduction.Metrics[i],
 				validationPathSectionReductionMetrics,
 				i,
 				validationContextMetric,
@@ -87,54 +88,50 @@ func (qx *QX) Validate() error {
 			}
 		}
 
-		outputs := make(map[string]struct{}, len(qx.Reduction.Group)+len(qx.Reduction.Metrics))
 		for i := range qx.Reduction.Group {
-			if err := v.recordOutputName(qx.Reduction.Group[i], validationPathSectionReductionGroup, i, outputs); err != nil {
+			if err := v.recordOutputName(&qx.Reduction.Group[i], validationPathSectionReductionGroup, i, &v.availableOutputs); err != nil {
 				return err
 			}
 		}
 		for i := range qx.Reduction.Metrics {
-			if err := v.recordOutputName(qx.Reduction.Metrics[i], validationPathSectionReductionMetrics, i, outputs); err != nil {
+			if err := v.recordOutputName(&qx.Reduction.Metrics[i], validationPathSectionReductionMetrics, i, &v.availableOutputs); err != nil {
 				return err
 			}
 		}
-		v.availableOutputs = outputs
 
 		v.resetPath()
 		if err := v.validateOptionalExpr(
-			qx.Reduction.Having,
+			&qx.Reduction.Having,
 			validationPathSectionReductionHaving,
 			-1,
 			validationContextHaving,
 		); err != nil {
 			return err
 		}
-	} else {
-		v.availableOutputs = nil
 	}
 
 	orderCtx := validationContextOrderPreReduction
-	if qx.HasReduction() {
+	if hasReduction {
 		orderCtx = validationContextOrderPostReduction
 	}
 	for i := range qx.Order {
 		v.resetPath()
-		if err := v.validateRequiredExpr(qx.Order[i].By, validationPathSectionOrderBy, i, orderCtx); err != nil {
+		if err := v.validateRequiredExpr(&qx.Order[i].By, validationPathSectionOrderBy, i, orderCtx); err != nil {
 			return err
 		}
 	}
 
 	projectionCtx := validationContextProjectionPreReduction
-	if qx.HasReduction() {
+	if hasReduction {
 		projectionCtx = validationContextProjectionPostReduction
 	}
-	projectionOutputs := make(map[string]struct{}, len(qx.Projection))
+	var projectionOutputs validationNameSet
 	for i := range qx.Projection {
 		v.resetPath()
-		if err := v.validateRequiredExpr(qx.Projection[i], validationPathSectionProjection, i, projectionCtx); err != nil {
+		if err := v.validateRequiredExpr(&qx.Projection[i], validationPathSectionProjection, i, projectionCtx); err != nil {
 			return err
 		}
-		if err := v.recordRequiredOutputName(qx.Projection[i], validationPathSectionProjection, i, projectionOutputs); err != nil {
+		if err := v.recordRequiredOutputName(&qx.Projection[i], validationPathSectionProjection, i, &projectionOutputs); err != nil {
 			return err
 		}
 	}
@@ -167,13 +164,66 @@ const (
 	validationPathSectionProjection
 )
 
-const validationInlineArgDepth = 16
+const (
+	validationInlineArgDepth  = 16
+	validationInlineNameCount = 16
+)
+
+// validationNameSet keeps the common small-query path on the stack and only
+// creates a map for unusually wide metadata, reduction, or projection lists.
+type validationNameSet struct {
+	inline   [validationInlineNameCount]string
+	count    int
+	overflow map[string]struct{}
+}
+
+// add reports whether name was newly inserted.
+func (s *validationNameSet) add(name string) bool {
+	if s.overflow != nil {
+		if _, exists := s.overflow[name]; exists {
+			return false
+		}
+		s.overflow[name] = struct{}{}
+		return true
+	}
+
+	for i := 0; i < s.count; i++ {
+		if s.inline[i] == name {
+			return false
+		}
+	}
+	if s.count < len(s.inline) {
+		s.inline[s.count] = name
+		s.count++
+		return true
+	}
+
+	s.overflow = make(map[string]struct{}, s.count+1)
+	for i := 0; i < s.count; i++ {
+		s.overflow[s.inline[i]] = struct{}{}
+	}
+	s.overflow[name] = struct{}{}
+	return true
+}
+
+func (s *validationNameSet) contains(name string) bool {
+	if s.overflow != nil {
+		_, exists := s.overflow[name]
+		return exists
+	}
+	for i := 0; i < s.count; i++ {
+		if s.inline[i] == name {
+			return true
+		}
+	}
+	return false
+}
 
 type validator struct {
 	argPath          [validationInlineArgDepth]int
 	argDepth         int
 	argOverflow      []int
-	availableOutputs map[string]struct{}
+	availableOutputs validationNameSet
 }
 
 func (v *validator) resetPath() {
@@ -206,7 +256,7 @@ func (v *validator) argIndex(level int) int {
 }
 
 func (v *validator) validateMetadata(meta []MetaEntry) error {
-	seen := make(map[string]struct{}, len(meta))
+	var seen validationNameSet
 
 	for i := range meta {
 		key := strings.TrimSpace(meta[i].Key)
@@ -216,25 +266,24 @@ func (v *validator) validateMetadata(meta []MetaEntry) error {
 		if key != meta[i].Key {
 			return v.validationError(validationPathSectionMeta, i, "invalid_meta_key", "meta key must not have leading or trailing whitespace")
 		}
-		if _, exists := seen[key]; exists {
+		if !seen.add(key) {
 			return v.validationError(validationPathSectionMeta, i, "duplicate_meta_key", fmt.Sprintf("meta key %q is already defined", key))
 		}
-		seen[key] = struct{}{}
 	}
 
 	return nil
 }
 
-func (v *validator) validateOptionalExpr(expr Expr, section validationPathSection, itemIndex int, ctx validationContext) error {
+func (v *validator) validateOptionalExpr(expr *Expr, section validationPathSection, itemIndex int, ctx validationContext) error {
 	return v.validateExpr(expr, section, itemIndex, ctx, true, true)
 }
 
-func (v *validator) validateRequiredExpr(expr Expr, section validationPathSection, itemIndex int, ctx validationContext) error {
+func (v *validator) validateRequiredExpr(expr *Expr, section validationPathSection, itemIndex int, ctx validationContext) error {
 	return v.validateExpr(expr, section, itemIndex, ctx, true, false)
 }
 
-func (v *validator) validateExpr(expr Expr, section validationPathSection, itemIndex int, ctx validationContext, root, allowZero bool) error {
-	if expr.IsZero() {
+func (v *validator) validateExpr(expr *Expr, section validationPathSection, itemIndex int, ctx validationContext, root, allowZero bool) error {
+	if isZeroExpr(expr) {
 		if allowZero {
 			return nil
 		}
@@ -307,18 +356,18 @@ func (v *validator) validateExpr(expr Expr, section validationPathSection, itemI
 		return v.validationError(section, itemIndex, "predicate_required", "root expression must be a predicate")
 	}
 	if root && requiresOutputName(ctx) {
-		if _, ok := expr.OutputName(); !ok {
+		if _, ok := validationOutputName(expr); !ok {
 			return v.validationError(section, itemIndex, "output_name_required", "projection expression must have an output name")
 		}
 	}
 	if expr.Kind == KindREF && forbidsRef(ctx) {
 		return v.validationError(section, itemIndex, "ref_not_allowed", "REF is not allowed in this query section")
 	}
-	if expr.Kind == KindOUT && !allowsOut(ctx) {
-		return v.validationError(section, itemIndex, "out_not_allowed", "OUT is not allowed in this query section")
-	}
-	if expr.Kind == KindOUT && allowsOut(ctx) && v.availableOutputs != nil {
-		if _, ok := v.availableOutputs[expr.Name]; !ok {
+	if expr.Kind == KindOUT {
+		if !allowsOut(ctx) {
+			return v.validationError(section, itemIndex, "out_not_allowed", "OUT is not allowed in this query section")
+		}
+		if !v.availableOutputs.contains(expr.Name) {
 			return v.validationError(section, itemIndex, "unknown_output", fmt.Sprintf("output name %q is not defined by reduction", expr.Name))
 		}
 	}
@@ -331,14 +380,14 @@ func (v *validator) validateExpr(expr Expr, section validationPathSection, itemI
 
 	for i := range expr.Args {
 		v.pushArg(i)
-		err := v.validateExpr(expr.Args[i], section, itemIndex, ctx, false, false)
+		err := v.validateExpr(&expr.Args[i], section, itemIndex, ctx, false, false)
 		v.popArg()
 		if err != nil {
 			return err
 		}
 	}
 
-	if expr.Kind == KindOP && expr.Name == OpIF && !isPredicateExpr(expr.Args[0]) {
+	if expr.Kind == KindOP && expr.Name == OpIF && !isPredicateExpr(&expr.Args[0]) {
 		v.pushArg(0)
 		err := v.validationError(section, itemIndex, "predicate_required", "if condition must be a predicate")
 		v.popArg()
@@ -426,11 +475,11 @@ func forbidsKnownAggregates(ctx validationContext) bool {
 		ctx == validationContextProjectionPostReduction
 }
 
-func isPredicateRoot(expr Expr) bool {
+func isPredicateRoot(expr *Expr) bool {
 	return isPredicateExpr(expr)
 }
 
-func isPredicateExpr(expr Expr) bool {
+func isPredicateExpr(expr *Expr) bool {
 	if expr.Kind != KindOP {
 		return false
 	}
@@ -482,7 +531,7 @@ func isKnownAggregateOp(name string) bool {
 	}
 }
 
-func hasMetricSemantics(expr Expr) bool {
+func hasMetricSemantics(expr *Expr) bool {
 	if expr.Kind != KindOP {
 		return false
 	}
@@ -490,31 +539,46 @@ func hasMetricSemantics(expr Expr) bool {
 		return true
 	}
 	for i := range expr.Args {
-		if hasMetricSemantics(expr.Args[i]) {
+		if hasMetricSemantics(&expr.Args[i]) {
 			return true
 		}
 	}
 	return false
 }
 
-func (v *validator) recordOutputName(expr Expr, section validationPathSection, itemIndex int, seen map[string]struct{}) error {
-	name, ok := expr.OutputName()
+func isZeroExpr(expr *Expr) bool {
+	return expr.Kind == KindNONE && expr.Name == "" && expr.Alias == "" && expr.Value == nil && len(expr.Args) == 0
+}
+
+func validationOutputName(expr *Expr) (string, bool) {
+	if expr.Alias != "" {
+		return expr.Alias, true
+	}
+	switch expr.Kind {
+	case KindREF, KindOUT:
+		if name := strings.TrimSpace(expr.Name); name != "" {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+func (v *validator) recordOutputName(expr *Expr, section validationPathSection, itemIndex int, seen *validationNameSet) error {
+	name, ok := validationOutputName(expr)
 	if !ok {
 		return nil
 	}
-	if _, exists := seen[name]; exists {
+	if !seen.add(name) {
 		return v.validationError(section, itemIndex, "duplicate_output_name", fmt.Sprintf("output name %q is already defined", name))
 	}
-	seen[name] = struct{}{}
 	return nil
 }
 
-func (v *validator) recordRequiredOutputName(expr Expr, section validationPathSection, itemIndex int, seen map[string]struct{}) error {
-	name, _ := expr.OutputName()
-	if _, exists := seen[name]; exists {
+func (v *validator) recordRequiredOutputName(expr *Expr, section validationPathSection, itemIndex int, seen *validationNameSet) error {
+	name, _ := validationOutputName(expr)
+	if !seen.add(name) {
 		return v.validationError(section, itemIndex, "duplicate_output_name", fmt.Sprintf("output name %q is already defined", name))
 	}
-	seen[name] = struct{}{}
 	return nil
 }
 
