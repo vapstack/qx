@@ -108,7 +108,8 @@ func TestNormalizeExpr_StructuralRewrites(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeExpr(tt.in)
+			got := tt.in
+			normalizeExpr(&got)
 			assertExprEqual(t, got, tt.want)
 		})
 	}
@@ -117,25 +118,44 @@ func TestNormalizeExpr_StructuralRewrites(t *testing.T) {
 func TestNormalizeExprCOW_ChangeFlag(t *testing.T) {
 	t.Run("reports unchanged for already normalized expression", func(t *testing.T) {
 		in := AND(EQ("a", 1), EQ("b", 2))
+		got := REF("dst must remain untouched")
+		wantDst := got
 
-		got, changed := normalizeExprCOW(in)
+		changed := normalizeExprCOW(&in, &got)
 
 		if changed {
 			t.Fatalf("changed = true, want false")
 		}
-		assertExprEqual(t, got, in)
+		assertExprEqual(t, got, wantDst)
 	})
 
 	t.Run("reports changed when rewrite happens", func(t *testing.T) {
 		in := AND(EQ("a", 1), AND(EQ("b", 2)))
 		want := AND(EQ("a", 1), EQ("b", 2))
+		var got Expr
 
-		got, changed := normalizeExprCOW(in)
+		changed := normalizeExprCOW(&in, &got)
 
 		if !changed {
 			t.Fatalf("changed = false, want true")
 		}
 		assertExprEqual(t, got, want)
+		assertExprEqual(t, in, AND(EQ("a", 1), AND(EQ("b", 2))))
+	})
+
+	t.Run("does not overwrite unread args while flattening a changed slice", func(t *testing.T) {
+		in := AND(
+			AND(AND()),
+			EQ("b", 2),
+		)
+		var got Expr
+
+		changed := normalizeExprCOW(&in, &got)
+
+		if !changed {
+			t.Fatalf("changed = false, want true")
+		}
+		assertExprEqual(t, got, EQ("b", 2))
 	})
 }
 

@@ -14,91 +14,117 @@ func (qx *QX) Normalize() *QX {
 	if qx == nil {
 		return nil
 	}
-	qx.Filter = normalizeExpr(qx.Filter)
+	normalizeExpr(&qx.Filter)
 	if qx.Reduction != nil {
 		for i := range qx.Reduction.Group {
-			qx.Reduction.Group[i] = normalizeExpr(qx.Reduction.Group[i])
+			normalizeExpr(&qx.Reduction.Group[i])
 		}
 		for i := range qx.Reduction.Metrics {
-			qx.Reduction.Metrics[i] = normalizeExpr(qx.Reduction.Metrics[i])
+			normalizeExpr(&qx.Reduction.Metrics[i])
 		}
-		qx.Reduction.Having = normalizeExpr(qx.Reduction.Having)
+		normalizeExpr(&qx.Reduction.Having)
 	}
 	for i := range qx.Order {
-		qx.Order[i].By = normalizeExpr(qx.Order[i].By)
+		normalizeExpr(&qx.Order[i].By)
 	}
 	for i := range qx.Projection {
-		qx.Projection[i] = normalizeExpr(qx.Projection[i])
+		normalizeExpr(&qx.Projection[i])
 	}
 	return qx
 }
 
-func normalizeExpr(expr Expr) Expr {
-	normalized, _ := normalizeExprCOW(expr)
-	return normalized
+func normalizeExpr(expr *Expr) {
+	var normalized Expr
+	if normalizeExprCOW(expr, &normalized) {
+		*expr = normalized
+	}
 }
 
-func normalizeExprCOW(expr Expr) (Expr, bool) {
-	if expr.IsZero() {
-		return expr, false
+// normalizeExprCOW writes a normalized expression to dst only when src changes.
+// Keeping the unchanged result in src avoids copying the relatively large Expr
+// value at every node on the common already-normalized path.
+func normalizeExprCOW(src *Expr, dst *Expr) bool {
+	if src.IsZero() {
+		return false
 	}
 
-	args, argsChanged := normalizeExprArgs(expr.Args)
+	var args []Expr
+	argsChanged := normalizeExprArgs(src.Args, &args)
+	if !argsChanged {
+		args = src.Args
+	}
 
-	if expr.Kind != KindOP {
+	if src.Kind != KindOP {
 		if !argsChanged {
-			return expr, false
+			return false
 		}
-		expr.Args = args
-		return expr, true
+		*dst = *src
+		dst.Args = args
+		return true
 	}
-	if expr.Name != OpAND && expr.Name != OpOR {
+	if src.Name != OpAND && src.Name != OpOR {
 		if !argsChanged {
-			return expr, false
+			return false
 		}
-		expr.Args = args
-		return expr, true
+		*dst = *src
+		dst.Args = args
+		return true
 	}
 
-	expr, logicalChanged := normalizeLogicalExpr(expr, args, argsChanged)
-	return expr, argsChanged || logicalChanged
+	return normalizeLogicalExprCOW(src, args, argsChanged, dst)
 }
 
-func normalizeExprArgs(args []Expr) ([]Expr, bool) {
-	var dst []Expr
+func normalizeExprArgs(src []Expr, dst *[]Expr) bool {
+	var normalized []Expr
 
-	for i := range args {
-		arg, changed := normalizeExprCOW(args[i])
-		if dst != nil {
-			dst[i] = args[i]
+	for i := range src {
+		var arg Expr
+		changed := normalizeExprCOW(&src[i], &arg)
+		if normalized != nil {
+			normalized[i] = src[i]
 		}
 		if !changed {
 			continue
 		}
-		if dst == nil {
-			dst = make([]Expr, len(args))
-			copy(dst, args[:i])
+		if normalized == nil {
+			normalized = make([]Expr, len(src))
+			copy(normalized, src[:i])
 		}
-		dst[i] = arg
+		normalized[i] = arg
 	}
 
-	if dst == nil {
-		return args, false
+	if normalized == nil {
+		return false
 	}
-	return dst, true
+	*dst = normalized
+	return true
 }
 
-func normalizeLogicalExpr(expr Expr, args []Expr, canReuse bool) (Expr, bool) {
-	args, flattened := normalizeLogicalArgs(expr.Name, args, canReuse)
-	expr.Args = args
+func normalizeLogicalExprCOW(src *Expr, args []Expr, canReuse bool, dst *Expr) bool {
+	args, flattened := normalizeLogicalArgs(src.Name, args, canReuse)
 
-	if len(expr.Args) != 1 {
-		return expr, flattened
+	if len(args) != 1 {
+		if !canReuse && !flattened {
+			return false
+		}
+		*dst = *src
+		dst.Args = args
+		return true
 	}
-	if hasExprMetadata(expr) && hasExprMetadata(expr.Args[0]) {
-		return expr, flattened
+	if hasExprMetadata(*src) && hasExprMetadata(args[0]) {
+		if !canReuse && !flattened {
+			return false
+		}
+		*dst = *src
+		dst.Args = args
+		return true
 	}
-	return collapseLogicalExpr(expr), true
+
+	*dst = args[0]
+	if src.Alias != "" && dst.Alias == "" {
+		dst.Alias = src.Alias
+	}
+	return true
 }
 
 func normalizeLogicalArgs(op string, args []Expr, canReuse bool) ([]Expr, bool) {
@@ -108,12 +134,29 @@ func normalizeLogicalArgs(op string, args []Expr, canReuse bool) ([]Expr, bool) 
 	}
 
 	var dst []Expr
-	if canReuse && total <= cap(args) {
+	if canReuse && total <= cap(args) && canFlattenLogicalArgsBackward(args, op, total) {
 		dst = args[:total]
 	} else {
 		dst = make([]Expr, total)
 	}
 	return appendNormalizedLogicalArgs(dst, op, args), true
+}
+
+// canFlattenLogicalArgsBackward reports whether appendNormalizedLogicalArgs
+// can reuse args without overwriting an earlier element before reading it.
+func canFlattenLogicalArgsBackward(args []Expr, op string, total int) bool {
+	write := total
+	for i := len(args) - 1; i >= 0; i-- {
+		width := 1
+		if isFlattenableLogicalArg(args[i], op) {
+			width = len(args[i].Args)
+		}
+		write -= width
+		if width != 0 && write < i {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizedLogicalArgsLen(op string, args []Expr) (int, bool) {
@@ -147,21 +190,6 @@ func appendNormalizedLogicalArgs(dst []Expr, op string, args []Expr) []Expr {
 	}
 
 	return dst[write:]
-}
-
-func collapseLogicalExpr(expr Expr) Expr {
-	if len(expr.Args) != 1 {
-		return expr
-	}
-
-	only := expr.Args[0]
-	if hasExprMetadata(expr) && hasExprMetadata(only) {
-		return expr
-	}
-	if expr.Alias != "" && only.Alias == "" {
-		only.Alias = expr.Alias
-	}
-	return only
 }
 
 func hasExprMetadata(expr Expr) bool {
