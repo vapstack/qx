@@ -80,10 +80,18 @@ func OUT(name string) Expr { return Expr{Kind: KindOUT, Name: name} }
 func LIT(v any) Expr { return Expr{Kind: KindLIT, Value: v} }
 
 // OP builds a generic function expression.
-func OP[T string | Op](name T, args ...Expr) Expr {
+func OP(name string, args ...Expr) Expr {
 	return Expr{
 		Kind: KindOP,
-		Name: strings.TrimSpace(string(name)),
+		Name: strings.TrimSpace(name),
+		Args: args,
+	}
+}
+
+func safeOP(name string, args ...Expr) Expr {
+	return Expr{
+		Kind: KindOP,
+		Name: name,
 		Args: args,
 	}
 }
@@ -109,9 +117,6 @@ type (
 		Key   string `json:"key"`
 		Value any    `json:"value,omitempty"`
 	}
-
-	// Op identifies an operation name in the query IR.
-	Op string
 
 	// Expr is a single query IR node.
 	//
