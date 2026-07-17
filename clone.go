@@ -18,49 +18,50 @@ func (qx *QX) Clone() *QX {
 		return nil
 	}
 
-	cloner := valueCloner{
-		seen: make(map[cloneVisit]reflect.Value, 8),
-	}
-
-	dst := &QX{
-		Filter:     cloner.cloneExpr(qx.Filter),
-		Window:     qx.Window,
-		Projection: cloner.cloneExprSlice(qx.Projection),
-	}
+	var cloner valueCloner
+	dst := new(QX)
+	*dst = *qx
+	cloner.cloneExpr(&qx.Filter, &dst.Filter)
+	dst.Projection = cloner.cloneExprSlice(qx.Projection)
 
 	if qx.Metadata != nil {
 		dst.Metadata = make([]MetaEntry, len(qx.Metadata))
+		copy(dst.Metadata, qx.Metadata)
 		for i := range qx.Metadata {
-			dst.Metadata[i] = MetaEntry{
-				Key:   qx.Metadata[i].Key,
-				Value: cloner.cloneValue(qx.Metadata[i].Value),
-			}
+			dst.Metadata[i].Value = cloner.cloneValue(qx.Metadata[i].Value)
 		}
 	}
 
 	if qx.Reduction != nil {
-		dst.Reduction = &Reduction{
-			Group:   cloner.cloneExprSlice(qx.Reduction.Group),
-			Metrics: cloner.cloneExprSlice(qx.Reduction.Metrics),
-			Having:  cloner.cloneExpr(qx.Reduction.Having),
-		}
+		dst.Reduction = new(Reduction)
+		*dst.Reduction = *qx.Reduction
+		dst.Reduction.Group = cloner.cloneExprSlice(qx.Reduction.Group)
+		dst.Reduction.Metrics = cloner.cloneExprSlice(qx.Reduction.Metrics)
+		cloner.cloneExpr(&qx.Reduction.Having, &dst.Reduction.Having)
 	}
 
 	if qx.Order != nil {
 		dst.Order = make([]Order, len(qx.Order))
+		copy(dst.Order, qx.Order)
 		for i := range qx.Order {
-			dst.Order[i] = Order{
-				By:   cloner.cloneExpr(qx.Order[i].By),
-				Desc: qx.Order[i].Desc,
-			}
+			cloner.cloneExpr(&qx.Order[i].By, &dst.Order[i].By)
 		}
 	}
 
 	return dst
 }
 
+const cloneInlineVisitCount = 16
+
 type valueCloner struct {
-	seen map[cloneVisit]reflect.Value
+	inline   [cloneInlineVisitCount]cloneSeen
+	count    int
+	overflow map[cloneVisit]reflect.Value
+}
+
+type cloneSeen struct {
+	visit cloneVisit
+	value reflect.Value
 }
 
 type cloneVisit struct {
@@ -69,18 +70,18 @@ type cloneVisit struct {
 	len int
 }
 
-func (cloner *valueCloner) cloneExpr(expr Expr) Expr {
-	dst := expr
+func (cloner *valueCloner) cloneExpr(src *Expr, dst *Expr) {
+	*dst = *src
+	cloner.cloneExprData(src, dst)
+}
 
-	if expr.Args != nil {
-		dst.Args = cloner.cloneExprSlice(expr.Args)
+func (cloner *valueCloner) cloneExprData(src *Expr, dst *Expr) {
+	if src.Args != nil {
+		dst.Args = cloner.cloneExprSlice(src.Args)
 	}
-
-	if expr.Value != nil {
-		dst.Value = cloner.cloneValue(expr.Value)
+	if src.Value != nil {
+		dst.Value = cloner.cloneValue(src.Value)
 	}
-
-	return dst
 }
 
 func (cloner *valueCloner) cloneExprSlice(src []Expr) []Expr {
@@ -92,14 +93,41 @@ func (cloner *valueCloner) cloneExprSlice(src []Expr) []Expr {
 	copy(dst, src)
 
 	for i := range dst {
-		if dst[i].Args != nil {
-			dst[i].Args = cloner.cloneExprSlice(dst[i].Args)
-		}
-		if dst[i].Value != nil {
-			dst[i].Value = cloner.cloneValue(dst[i].Value)
-		}
+		cloner.cloneExprData(&src[i], &dst[i])
 	}
 	return dst
+}
+
+func (cloner *valueCloner) findSeen(visit cloneVisit) (reflect.Value, bool) {
+	if cloner.overflow != nil {
+		dst, ok := cloner.overflow[visit]
+		return dst, ok
+	}
+	for i := 0; i < cloner.count; i++ {
+		if cloner.inline[i].visit == visit {
+			return cloner.inline[i].value, true
+		}
+	}
+	return reflect.Value{}, false
+}
+
+func (cloner *valueCloner) remember(visit cloneVisit, dst reflect.Value) {
+	if cloner.overflow != nil {
+		cloner.overflow[visit] = dst
+		return
+	}
+	if cloner.count < len(cloner.inline) {
+		cloner.inline[cloner.count] = cloneSeen{visit: visit, value: dst}
+		cloner.count++
+		return
+	}
+
+	cloner.overflow = make(map[cloneVisit]reflect.Value, cloneInlineVisitCount*2)
+	for i := 0; i < cloner.count; i++ {
+		seen := cloner.inline[i]
+		cloner.overflow[seen.visit] = seen.value
+	}
+	cloner.overflow[visit] = dst
 }
 
 func (cloner *valueCloner) cloneValue(src any) any {
@@ -107,12 +135,135 @@ func (cloner *valueCloner) cloneValue(src any) any {
 		return nil
 	}
 
+	switch value := src.(type) {
+	case []byte:
+		return clonePrimitiveSlice(cloner, value)
+	case []string:
+		return clonePrimitiveSlice(cloner, value)
+	case []int:
+		return clonePrimitiveSlice(cloner, value)
+	case []float64:
+		return clonePrimitiveSlice(cloner, value)
+	case []bool:
+		return clonePrimitiveSlice(cloner, value)
+	case []any:
+		return cloner.cloneAnySlice(value)
+	case map[string]any:
+		return cloner.cloneStringAnyMap(value)
+	case map[string]string:
+		return clonePrimitiveMap(cloner, value)
+	case map[string][]byte:
+		return cloneStringSliceMap(cloner, value)
+	case map[string][]string:
+		return cloneStringSliceMap(cloner, value)
+	case map[string][]int:
+		return cloneStringSliceMap(cloner, value)
+	}
+
 	rv := reflect.ValueOf(src)
 	if !typeNeedsDeepClone(rv.Type()) {
 		return src
 	}
 
-	return cloner.cloneReflect(rv).Interface()
+	return cloner.cloneReflectDeep(rv).Interface()
+}
+
+func clonePrimitiveSlice[T any](cloner *valueCloner, src []T) any {
+	if src == nil {
+		return []T(nil)
+	}
+
+	visit := cloneVisit{
+		typ: reflect.TypeFor[[]T](),
+		ptr: uintptr(unsafe.Pointer(unsafe.SliceData(src))),
+		len: len(src),
+	}
+	if seen, ok := cloner.findSeen(visit); ok {
+		return seen.Interface()
+	}
+
+	dst := make([]T, len(src))
+	copy(dst, src)
+	value := reflect.ValueOf(dst)
+	cloner.remember(visit, value)
+	return value.Interface()
+}
+
+func clonePrimitiveMap[V any](cloner *valueCloner, src map[string]V) any {
+	if src == nil {
+		return map[string]V(nil)
+	}
+
+	visit := cloneVisit{typ: reflect.TypeFor[map[string]V](), ptr: reflect.ValueOf(src).Pointer()}
+	if seen, ok := cloner.findSeen(visit); ok {
+		return seen.Interface()
+	}
+
+	dst := make(map[string]V, len(src))
+	cloner.remember(visit, reflect.ValueOf(dst))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func (cloner *valueCloner) cloneAnySlice(src []any) any {
+	if src == nil {
+		return []any(nil)
+	}
+
+	visit := cloneVisit{
+		typ: reflect.TypeFor[[]any](),
+		ptr: uintptr(unsafe.Pointer(unsafe.SliceData(src))),
+		len: len(src),
+	}
+	if seen, ok := cloner.findSeen(visit); ok {
+		return seen.Interface()
+	}
+
+	dst := make([]any, len(src))
+	value := reflect.ValueOf(dst)
+	cloner.remember(visit, value)
+	for i := range src {
+		dst[i] = cloner.cloneValue(src[i])
+	}
+	return value.Interface()
+}
+
+func (cloner *valueCloner) cloneStringAnyMap(src map[string]any) any {
+	if src == nil {
+		return map[string]any(nil)
+	}
+
+	visit := cloneVisit{typ: reflect.TypeFor[map[string]any](), ptr: reflect.ValueOf(src).Pointer()}
+	if seen, ok := cloner.findSeen(visit); ok {
+		return seen.Interface()
+	}
+
+	dst := make(map[string]any, len(src))
+	cloner.remember(visit, reflect.ValueOf(dst))
+	for key, value := range src {
+		dst[key] = cloner.cloneValue(value)
+	}
+	return dst
+}
+
+func cloneStringSliceMap[T any](cloner *valueCloner, src map[string][]T) any {
+	if src == nil {
+		return map[string][]T(nil)
+	}
+
+	visit := cloneVisit{typ: reflect.TypeFor[map[string][]T](), ptr: reflect.ValueOf(src).Pointer()}
+	if seen, ok := cloner.findSeen(visit); ok {
+		return seen.Interface()
+	}
+
+	dst := make(map[string][]T, len(src))
+	cloner.remember(visit, reflect.ValueOf(dst))
+	for key, value := range src {
+		dst[key] = clonePrimitiveSlice(cloner, value).([]T)
+	}
+	return dst
 }
 
 func (cloner *valueCloner) cloneReflect(src reflect.Value) reflect.Value {
@@ -120,10 +271,14 @@ func (cloner *valueCloner) cloneReflect(src reflect.Value) reflect.Value {
 		return src
 	}
 
-	typ := src.Type()
-	if !typeNeedsDeepClone(typ) {
+	if !typeNeedsDeepClone(src.Type()) {
 		return src
 	}
+	return cloner.cloneReflectDeep(src)
+}
+
+func (cloner *valueCloner) cloneReflectDeep(src reflect.Value) reflect.Value {
+	typ := src.Type()
 
 	switch typ.Kind() {
 	case reflect.Interface:
@@ -141,13 +296,13 @@ func (cloner *valueCloner) cloneReflect(src reflect.Value) reflect.Value {
 		}
 
 		key := cloneVisit{typ: typ, ptr: src.Pointer()}
-		if dst, ok := cloner.seen[key]; ok {
+		if dst, ok := cloner.findSeen(key); ok {
 			return dst
 		}
 
 		dst := reflect.New(typ.Elem())
-		cloner.seen[key] = dst
-		setReflectValue(dst.Elem(), cloner.cloneReflect(src.Elem()))
+		cloner.remember(key, dst)
+		cloner.cloneReflectInto(src.Elem(), dst.Elem())
 		return dst
 
 	case reflect.Slice:
@@ -156,12 +311,12 @@ func (cloner *valueCloner) cloneReflect(src reflect.Value) reflect.Value {
 		}
 
 		key := cloneVisit{typ: typ, ptr: src.Pointer(), len: src.Len()}
-		if dst, ok := cloner.seen[key]; ok {
+		if dst, ok := cloner.findSeen(key); ok {
 			return dst
 		}
 
 		dst := reflect.MakeSlice(typ, src.Len(), src.Len())
-		cloner.seen[key] = dst
+		cloner.remember(key, dst)
 
 		if !typeNeedsDeepClone(typ.Elem()) {
 			reflect.Copy(dst, src)
@@ -169,21 +324,13 @@ func (cloner *valueCloner) cloneReflect(src reflect.Value) reflect.Value {
 		}
 
 		for i := range src.Len() {
-			setReflectValue(dst.Index(i), cloner.cloneReflect(src.Index(i)))
+			cloner.cloneReflectDeepInto(src.Index(i), dst.Index(i))
 		}
 		return dst
 
 	case reflect.Array:
 		dst := reflect.New(typ).Elem()
-
-		if !typeNeedsDeepClone(typ.Elem()) {
-			dst.Set(src)
-			return dst
-		}
-
-		for i := range src.Len() {
-			setReflectValue(dst.Index(i), cloner.cloneReflect(src.Index(i)))
-		}
+		cloner.cloneReflectInto(src, dst)
 		return dst
 
 	case reflect.Map:
@@ -192,12 +339,12 @@ func (cloner *valueCloner) cloneReflect(src reflect.Value) reflect.Value {
 		}
 
 		key := cloneVisit{typ: typ, ptr: src.Pointer()}
-		if dst, ok := cloner.seen[key]; ok {
+		if dst, ok := cloner.findSeen(key); ok {
 			return dst
 		}
 
 		dst := reflect.MakeMapWithSize(typ, src.Len())
-		cloner.seen[key] = dst
+		cloner.remember(key, dst)
 
 		keyNeedsDeepClone := typeNeedsDeepClone(typ.Key())
 		elemNeedsDeepClone := typeNeedsDeepClone(typ.Elem())
@@ -206,12 +353,12 @@ func (cloner *valueCloner) cloneReflect(src reflect.Value) reflect.Value {
 		for iter.Next() {
 			mapKey := iter.Key()
 			if keyNeedsDeepClone {
-				mapKey = cloner.cloneReflect(mapKey)
+				mapKey = cloner.cloneReflectDeep(mapKey)
 			}
 
 			mapValue := iter.Value()
 			if elemNeedsDeepClone {
-				mapValue = cloner.cloneReflect(mapValue)
+				mapValue = cloner.cloneReflectDeep(mapValue)
 			}
 
 			dst.SetMapIndex(mapKey, mapValue)
@@ -220,19 +367,46 @@ func (cloner *valueCloner) cloneReflect(src reflect.Value) reflect.Value {
 
 	case reflect.Struct:
 		dst := reflect.New(typ).Elem()
-		setReflectValue(dst, src)
-
-		for i := range src.NumField() {
-			field := typ.Field(i)
-			if !typeNeedsDeepClone(field.Type) {
-				continue
-			}
-			setReflectValue(dst.Field(i), cloner.cloneReflect(src.Field(i)))
-		}
+		cloner.cloneReflectInto(src, dst)
 		return dst
 
 	default:
 		return src
+	}
+}
+
+func (cloner *valueCloner) cloneReflectInto(src, dst reflect.Value) {
+	if !src.IsValid() {
+		return
+	}
+
+	typ := src.Type()
+	if !typeNeedsDeepClone(typ) {
+		setReflectValue(dst, src)
+		return
+	}
+	cloner.cloneReflectDeepInto(src, dst)
+}
+
+func (cloner *valueCloner) cloneReflectDeepInto(src, dst reflect.Value) {
+	typ := src.Type()
+	switch typ.Kind() {
+	case reflect.Array:
+		for i := range src.Len() {
+			cloner.cloneReflectDeepInto(src.Index(i), dst.Index(i))
+		}
+
+	case reflect.Struct:
+		setReflectValue(dst, src)
+		for i := range src.NumField() {
+			if !typeNeedsDeepClone(typ.Field(i).Type) {
+				continue
+			}
+			cloner.cloneReflectDeepInto(src.Field(i), dst.Field(i))
+		}
+
+	default:
+		setReflectValue(dst, cloner.cloneReflectDeep(src))
 	}
 }
 

@@ -18,6 +18,11 @@ type clonePayload struct {
 	Fixed  [2][]string
 }
 
+type cloneNode struct {
+	Name string
+	Next *cloneNode
+}
+
 func TestCloneNil(t *testing.T) {
 	if Clone(nil) != nil {
 		t.Fatalf("Clone(nil) must return nil")
@@ -404,6 +409,64 @@ func TestClonePreservesEmptyNonNilSlices(t *testing.T) {
 	}
 }
 
+func TestClonePreservesSharedValuesAndCycles(t *testing.T) {
+	shared := []int{1, 2, 3}
+
+	cyclicMap := make(map[string]any)
+	cyclicMap["self"] = cyclicMap
+
+	cyclicSlice := make([]any, 1)
+	cyclicSlice[0] = cyclicSlice
+
+	cyclicNode := &cloneNode{Name: "root"}
+	cyclicNode.Next = cyclicNode
+
+	q := Query(OP(
+		"clone_graph",
+		LIT(shared),
+		LIT(shared),
+		LIT(cyclicMap),
+		LIT(cyclicSlice),
+		LIT(cyclicNode),
+	))
+	clone := q.Clone()
+
+	clonedSharedA := clone.Filter.Args[0].Value.([]int)
+	clonedSharedB := clone.Filter.Args[1].Value.([]int)
+	if reflect.ValueOf(clonedSharedA).Pointer() == reflect.ValueOf(shared).Pointer() {
+		t.Fatal("cloned shared slice must not reuse source storage")
+	}
+	if reflect.ValueOf(clonedSharedA).Pointer() != reflect.ValueOf(clonedSharedB).Pointer() {
+		t.Fatal("clone must preserve shared slice identity")
+	}
+
+	clonedMap := clone.Filter.Args[2].Value.(map[string]any)
+	clonedMapSelf := clonedMap["self"].(map[string]any)
+	if reflect.ValueOf(clonedMap).Pointer() == reflect.ValueOf(cyclicMap).Pointer() {
+		t.Fatal("cloned cyclic map must not reuse source storage")
+	}
+	if reflect.ValueOf(clonedMap).Pointer() != reflect.ValueOf(clonedMapSelf).Pointer() {
+		t.Fatal("clone must preserve map cycle")
+	}
+
+	clonedSlice := clone.Filter.Args[3].Value.([]any)
+	clonedSliceSelf := clonedSlice[0].([]any)
+	if reflect.ValueOf(clonedSlice).Pointer() == reflect.ValueOf(cyclicSlice).Pointer() {
+		t.Fatal("cloned cyclic slice must not reuse source storage")
+	}
+	if reflect.ValueOf(clonedSlice).Pointer() != reflect.ValueOf(clonedSliceSelf).Pointer() {
+		t.Fatal("clone must preserve slice cycle")
+	}
+
+	clonedNode := clone.Filter.Args[4].Value.(*cloneNode)
+	if clonedNode == cyclicNode {
+		t.Fatal("cloned cyclic pointer must not reuse source")
+	}
+	if clonedNode.Next != clonedNode {
+		t.Fatal("clone must preserve pointer cycle")
+	}
+}
+
 func assertNotSameSliceData[T any](t *testing.T, src, dst []T, what string) {
 	t.Helper()
 
@@ -441,6 +504,28 @@ func BenchmarkCloneFlatLiterals(b *testing.B) {
 
 func BenchmarkCloneDeepLiterals(b *testing.B) {
 	q := benchmarkCloneDeepQuery()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		cloneBenchSink = q.Clone()
+	}
+}
+
+func BenchmarkCloneStructural(b *testing.B) {
+	q := benchmarkCloneStructuralQuery()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		cloneBenchSink = q.Clone()
+	}
+}
+
+func BenchmarkCloneJSONLiterals(b *testing.B) {
+	q := benchmarkCloneJSONQuery()
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -583,6 +668,44 @@ func benchmarkCloneDeepQuery() *QX {
 		},
 		Window: Window{Offset: 7, Limit: 11},
 	}
+}
+
+func benchmarkCloneStructuralQuery() *QX {
+	return Query(
+		AND(
+			EQ("status", "active"),
+			OR(
+				GT("amount", 100),
+				LT("amount", 1000),
+				NOT(EXISTS("deleted_at")),
+			),
+			EQ(LOWER("country"), "us"),
+		),
+	).
+		GroupBy(LOWER("country").AS("country_lower")).
+		Metrics(SUM("amount").AS("total_amount"), ROWCOUNT().AS("rows")).
+		Having(GT(OUT("total_amount"), 100)).
+		SortOut("total_amount", DESC).
+		SelectOut("country_lower", "total_amount", "rows")
+}
+
+func benchmarkCloneJSONQuery() *QX {
+	return Query(LIT(map[string]any{
+		"active": true,
+		"bytes":  makeBenchmarkBytes(256),
+		"labels": []any{
+			"draft",
+			"paid",
+			map[string]any{
+				"region": "eu",
+				"scores": []float64{1.5, 2.5, 3.5},
+			},
+		},
+		"metadata": map[string]any{
+			"flags": []bool{true, false, true},
+			"ids":   makeBenchmarkInts(64),
+		},
+	}))
 }
 
 func makeBenchmarkStrings(n int) []string {
