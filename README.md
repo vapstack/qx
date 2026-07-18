@@ -254,9 +254,7 @@ Validation catches:
 - post-reduction projection that still uses `REF`
 - projection items without stable output names
 
-## JSON and metadata
-
-`QX` and `Expr` implement JSON marshal and unmarshal to speed up some encoding/decoding paths.
+## Metadata
 
 Metadata can travel with the query itself:
 
@@ -278,7 +276,7 @@ q := qx.
 - `MetaValue(key)` reads a value by key
 - `DeleteMeta(keys...)` removes metadata entries
 - metadata is serialized under the top-level `meta` field
-- metadata is preserved by `Clone`, `Normalize`, `Validate`, and JSON round-trips
+- metadata is preserved by `Clone`, `Normalize` and `Validate`
 
 ## Custom operations
 
